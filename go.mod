@@ -1,4 +1,4 @@
-module github.com/sters/go-project-boilerplate
+module github.com/sters/go-test-file-splitter
 
 go 1.24
 
