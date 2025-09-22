@@ -19,6 +19,7 @@ var ErrTypeCast = errors.New("failed to cast to GenDecl")
 type TestFunction struct {
 	Name     string
 	FuncDecl *ast.FuncDecl
+	Comments *ast.CommentGroup
 	Imports  []*ast.ImportSpec
 	Package  string
 }
@@ -228,6 +229,7 @@ func extractTestFunctions(node *ast.File) ([]TestFunction, bool) {
 		test := TestFunction{
 			Name:     fn.Name.Name,
 			FuncDecl: fn,
+			Comments: fn.Doc,
 			Imports:  node.Imports,
 			Package:  node.Name.Name,
 		}
@@ -241,14 +243,17 @@ func writeTestFile(filename string, test TestFunction, fset *token.FileSet) erro
 	// Build declarations: imports first, then the test function
 	var decls []ast.Decl
 
-	// Add import declarations if there are any imports
-	if len(test.Imports) > 0 {
+	// Find which imports are actually used in this test function
+	usedImports := findUsedImports(test.FuncDecl, test.Imports)
+
+	// Add import declarations if there are any used imports
+	if len(usedImports) > 0 {
 		decls = append(decls, &ast.GenDecl{
 			Tok:   token.IMPORT,
-			Specs: make([]ast.Spec, len(test.Imports)),
+			Specs: make([]ast.Spec, len(usedImports)),
 		})
 		// Copy import specs
-		for i, imp := range test.Imports {
+		for i, imp := range usedImports {
 			genDecl, ok := decls[0].(*ast.GenDecl)
 			if !ok {
 				return ErrTypeCast
@@ -257,7 +262,10 @@ func writeTestFile(filename string, test TestFunction, fset *token.FileSet) erro
 		}
 	}
 
-	// Add the test function
+	// Add the test function with its comments
+	if test.Comments != nil {
+		test.FuncDecl.Doc = test.Comments
+	}
 	decls = append(decls, test.FuncDecl)
 
 	// Create an AST file with the test function and imports
@@ -278,6 +286,69 @@ func writeTestFile(filename string, test TestFunction, fset *token.FileSet) erro
 	}
 
 	return nil
+}
+
+func findUsedImports(fn *ast.FuncDecl, allImports []*ast.ImportSpec) []*ast.ImportSpec {
+	usedPackages := make(map[string]bool)
+
+	// Always include "testing" package for test functions
+	usedPackages["testing"] = true
+
+	// Walk through the function body to find used packages
+	ast.Inspect(fn, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.SelectorExpr:
+			// e.g., fmt.Println, strings.HasPrefix
+			if ident, ok := x.X.(*ast.Ident); ok {
+				usedPackages[ident.Name] = true
+			}
+		case *ast.CallExpr:
+			// Check for type assertions and conversions that might use imported types
+			if ident, ok := x.Fun.(*ast.Ident); ok {
+				usedPackages[ident.Name] = true
+			}
+		case *ast.Ident:
+			// Check for types from imported packages
+			// This is a simplified check - might need refinement for complex cases
+			if x.Obj == nil && x.Name != "" {
+				// Could be a package-level identifier
+				usedPackages[x.Name] = true
+			}
+		}
+
+		return true
+	})
+
+	// Filter imports to only include used ones
+	var result []*ast.ImportSpec
+	for _, imp := range allImports {
+		importPath := strings.Trim(imp.Path.Value, `"`)
+
+		// Get the package name (last part of import path or alias)
+		var pkgName string
+		if imp.Name != nil {
+			pkgName = imp.Name.Name
+		} else {
+			parts := strings.Split(importPath, "/")
+			pkgName = parts[len(parts)-1]
+		}
+
+		// Check if this import should be included
+		switch {
+		case importPath == "testing" && usedPackages["testing"]:
+			result = append(result, imp)
+		case usedPackages[pkgName]:
+			result = append(result, imp)
+		case strings.Contains(importPath, "testify/assert") && usedPackages["assert"]:
+			result = append(result, imp)
+		case strings.Contains(importPath, "testify/require") && usedPackages["require"]:
+			result = append(result, imp)
+		case strings.Contains(importPath, "testify/suite") && usedPackages["suite"]:
+			result = append(result, imp)
+		}
+	}
+
+	return result
 }
 
 func testNameToSnakeCase(name string) string {
