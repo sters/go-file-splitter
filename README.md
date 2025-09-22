@@ -1,87 +1,87 @@
 # go-file-splitter
 
-Go言語のソースファイルを関数単位で分割するCLIツールです。パブリック関数、メソッド、テスト関数を個別のファイルに分割できます。
+A CLI tool that splits Go source files into individual files by function. It can separate public functions, methods, and test functions into individual files.
 
-## 機能
+## Features
 
-- **パブリック関数の分割**: Goファイル内のパブリック関数（大文字で始まる関数）を個別ファイルに分割
-- **パブリックメソッドの分割**: 構造体のパブリックメソッドを分割（2つの戦略から選択可能）
-- **テスト関数の分割**: `Test`で始まるテスト関数を個別ファイルに分割
-- **定数・変数・型定義の処理**: パブリックな定義を`common.go`にまとめて出力
-- **コメントの保持**: ドキュメントコメント、インラインコメント、スタンドアロンコメントを適切に処理
-- **インポートの最適化**: 使用されているパッケージのみをインポート
+- **Public Function Splitting**: Splits public functions (starting with uppercase) into individual files
+- **Public Method Splitting**: Splits struct public methods (with two strategies to choose from)
+- **Test Function Splitting**: Splits test functions starting with `Test` into individual files
+- **Constants, Variables, and Type Definitions**: Groups public definitions into `common.go`
+- **Comment Preservation**: Properly handles doc comments, inline comments, and standalone comments
+- **Import Optimization**: Only imports packages that are actually used
 
-## インストール
+## Installation
 
 ```shell
 go install github.com/sters/go-file-splitter@latest
 ```
 
-## 使い方
+## Usage
 
 ```shell
 go-file-splitter [options] <directory>
 ```
 
-### オプション
+### Options
 
-- `-public-func` (デフォルト: true): パブリック関数を個別ファイルに分割
-- `-test-only`: テスト関数のみを分割（`-public-func`を上書き）
-- `-method-strategy <strategy>`: メソッドの分割戦略を指定
-  - `separate` (デフォルト): 各メソッドを個別ファイルに分割
-  - `with-struct`: 構造体と関連メソッドを同一ファイルにまとめる
-- `-version`: バージョン情報を表示
+- `-public-func` (default: true): Split public functions into individual files
+- `-test-only`: Split only test functions (overrides `-public-func`)
+- `-method-strategy <strategy>`: Specify method splitting strategy
+  - `separate` (default): Split each method into individual files
+  - `with-struct`: Group struct and its methods in the same file
+- `-version`: Show version information
 
-### 例
+### Examples
 
 ```shell
-# カレントディレクトリ内のGoファイルのパブリック関数を分割（デフォルト動作）
+# Split public functions in current directory (default behavior)
 go-file-splitter .
 
-# 特定ディレクトリのパブリック関数を分割
+# Split public functions in specific directory
 go-file-splitter ./pkg/mypackage
 
-# テスト関数のみを分割
+# Split only test functions
 go-file-splitter -test-only ./test
 
-# パブリック関数を明示的に分割
+# Explicitly split public functions
 go-file-splitter -public-func ./src
 
-# メソッドを構造体と同じファイルにまとめる戦略で分割
+# Split with methods grouped with their structs
 go-file-splitter -method-strategy with-struct ./pkg
 
-# メソッドを個別ファイルに分割（デフォルト動作）
+# Split methods into individual files (default behavior)
 go-file-splitter -method-strategy separate ./pkg
 ```
 
-## 出力構造
+## Output Structure
 
-### デフォルト戦略（separate）
-各パブリック関数・メソッドが個別のファイルに分割されます：
+### Default Strategy (separate)
+Each public function and method is split into individual files:
 ```
 output/
-├── common.go              # 定数、変数、型定義
-├── function_name.go       # パブリック関数
-├── type_name_method.go    # メソッド（個別ファイル）
-└── test_function.go       # テスト関数
+├── common.go              # Constants, variables, type definitions
+├── function_name.go       # Public functions
+├── type_name_method.go    # Methods (individual files)
+└── test_function.go       # Test functions
 ```
 
-### with-struct戦略
-構造体とそのメソッドが同一ファイルにまとめられます：
+### with-struct Strategy
+Structs and their methods are grouped in the same file:
 ```
 output/
-├── common.go              # 定数、変数、その他の型定義
-├── function_name.go       # パブリック関数
-├── type_name.go           # 構造体とそのすべてのメソッド
-└── test_function.go       # テスト関数
+├── common.go              # Constants, variables, other type definitions
+├── function_name.go       # Public functions
+├── type_name.go           # Struct with all its methods
+└── test_function.go       # Test functions
 ```
 
-## 主な改善点
+## Recent Improvements
 
-このツールの最近のアップデートには以下が含まれます：
+Recent updates to this tool include:
 
-- **テストカバレッジの向上**: 74.8%のカバレッジを達成
-- **コード品質の改善**: golangci-lintによるすべてのエラーを解決
-- **リファクタリング**: 複雑な関数を分割し、保守性を向上
-- **インポートの最適化**: 実際に使用されているパッケージのみをインポート
-- **コメント処理の改善**: スタンドアロンコメントとインラインコメントの適切な処理
+- **Improved Test Coverage**: Achieved 74.8% coverage
+- **Code Quality Improvements**: Resolved all golangci-lint errors
+- **Refactoring**: Split complex functions to improve maintainability
+- **Import Optimization**: Only imports packages that are actually used
+- **Enhanced Comment Handling**: Properly handles standalone and inline comments
