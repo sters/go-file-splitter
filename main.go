@@ -8,7 +8,16 @@ import (
 	"github.com/sters/go-test-file-splitter/splitter"
 )
 
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
+	var showVersion bool
+	flag.BoolVar(&showVersion, "version", false, "Show version information")
+
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s <directory>\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "\nSplit Go test files by individual test functions.\n")
@@ -17,6 +26,13 @@ func main() {
 	}
 
 	flag.Parse()
+
+	if showVersion {
+		fmt.Printf("go-test-file-splitter version %s\n", version)
+		fmt.Printf("  commit: %s\n", commit)
+		fmt.Printf("  built:  %s\n", date)
+		os.Exit(0)
+	}
 
 	if flag.NArg() != 1 {
 		flag.Usage()
