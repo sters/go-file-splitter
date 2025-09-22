@@ -16,16 +16,41 @@ import (
 
 var ErrTypeCast = errors.New("failed to cast to GenDecl")
 
-type TestFunction struct {
+type PublicFunction struct {
 	Name               string
 	FuncDecl           *ast.FuncDecl
 	Comments           *ast.CommentGroup
-	StandaloneComments []*ast.CommentGroup // Comments that appear before the function but are not doc comments
+	StandaloneComments []*ast.CommentGroup
 	Imports            []*ast.ImportSpec
 	Package            string
 }
 
-func SplitTestFiles(directory string) error {
+type PublicDeclaration struct {
+	GenDecl  *ast.GenDecl
+	Comments *ast.CommentGroup
+	Package  string
+	Imports  []*ast.ImportSpec
+}
+
+func SplitPublicFunctions(directory string) error {
+	goFiles, err := findGoFiles(directory)
+	if err != nil {
+		return fmt.Errorf("failed to find go files: %w", err)
+	}
+
+	for _, file := range goFiles {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		if err := processGoFile(file); err != nil {
+			return fmt.Errorf("failed to process %s: %w", file, err)
+		}
+	}
+
+	return nil
+}
+
+func SplitTestFunctions(directory string) error {
 	testFiles, err := findTestFiles(directory)
 	if err != nil {
 		return fmt.Errorf("failed to find test files: %w", err)
@@ -38,6 +63,31 @@ func SplitTestFiles(directory string) error {
 	}
 
 	return nil
+}
+
+func findGoFiles(directory string) ([]string, error) {
+	var goFiles []string
+
+	err := filepath.WalkDir(directory, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if d.IsDir() {
+			return nil
+		}
+
+		if strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+			goFiles = append(goFiles, path)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to walk directory: %w", err)
+	}
+
+	return goFiles, nil
 }
 
 func findTestFiles(directory string) ([]string, error) {
@@ -65,6 +115,67 @@ func findTestFiles(directory string) ([]string, error) {
 	return testFiles, nil
 }
 
+func processGoFile(filename string) error {
+	fset := token.NewFileSet()
+	src, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+
+	node, err := parser.ParseFile(fset, filename, src, parser.ParseComments)
+	if err != nil {
+		return fmt.Errorf("failed to parse file: %w", err)
+	}
+
+	publicFuncs := extractPublicFunctions(node)
+	publicDecls := extractPublicDeclarations(node)
+
+	if len(publicFuncs) == 0 && len(publicDecls) == 0 {
+		return nil
+	}
+
+	outputDir := filepath.Dir(filename)
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	// Write public functions to individual files
+	for _, fn := range publicFuncs {
+		snakeCaseName := functionNameToSnakeCase(fn.Name)
+		outputFileName := snakeCaseName + ".go"
+		outputFile := filepath.Join(outputDir, outputFileName)
+
+		if err := writePublicFunction(outputFile, fn, fset); err != nil {
+			return fmt.Errorf("failed to write function file %s: %w", outputFile, err)
+		}
+		fmt.Printf("Created: %s\n", outputFile)
+
+		// Find and split corresponding test file
+		testFile := findCorrespondingTestFile(filename, fn.Name)
+		if testFile != "" {
+			if err := splitTestForFunction(testFile, fn.Name, outputDir); err != nil {
+				fmt.Printf("Warning: failed to split test for %s: %v\n", fn.Name, err)
+			}
+		}
+	}
+
+	// Write public const/var declarations to common.go
+	if len(publicDecls) > 0 {
+		commonFile := filepath.Join(outputDir, "common.go")
+		if err := writeCommonFile(commonFile, publicDecls, node.Name.Name, node.Imports, fset); err != nil {
+			return fmt.Errorf("failed to write common.go: %w", err)
+		}
+		fmt.Printf("Created: %s\n", commonFile)
+	}
+
+	// Update original file to keep only private content
+	if err := updateOriginalFile(filename, publicFuncs, publicDecls, fset); err != nil {
+		return fmt.Errorf("failed to update original file: %w", err)
+	}
+
+	return nil
+}
+
 func processTestFile(filename string) error {
 	fset := token.NewFileSet()
 	node, err := parser.ParseFile(fset, filename, nil, parser.ParseComments)
@@ -72,7 +183,7 @@ func processTestFile(filename string) error {
 		return fmt.Errorf("failed to parse file: %w", err)
 	}
 
-	tests, hasRemainingContent := extractTestFunctions(node)
+	tests := extractTestFunctions(node)
 	if len(tests) == 0 {
 		return nil
 	}
@@ -92,173 +203,157 @@ func processTestFile(filename string) error {
 		}
 
 		outputFile := filepath.Join(outputDir, outputFileName)
-		if err := writeTestFile(outputFile, test, fset); err != nil {
+		if err := writeTestFunction(outputFile, test, fset); err != nil {
 			return fmt.Errorf("failed to write test file %s: %w", outputFile, err)
 		}
 		fmt.Printf("Created: %s\n", outputFile)
 	}
 
-	// Only delete the original file if there's no remaining content
-	if !hasRemainingContent {
-		if err := os.Remove(filename); err != nil {
-			return fmt.Errorf("failed to delete original file %s: %w", filename, err)
-		}
-		fmt.Printf("Deleted original: %s\n", filename)
-	} else {
-		// Remove extracted tests from the original file
-		// removeExtractedTests will delete the file if it becomes empty
-		if err := removeExtractedTests(filename, tests, fset); err != nil {
-			return fmt.Errorf("failed to update original file %s: %w", filename, err)
-		}
-		// Check if file still exists after removal
-		if _, err := os.Stat(filename); !os.IsNotExist(err) {
-			fmt.Printf("Preserved original: %s (contains non-split tests or helper functions)\n", filename)
-		}
+	// Remove extracted tests from original file
+	if err := removeExtractedTests(filename, tests, fset); err != nil {
+		return fmt.Errorf("failed to update original file %s: %w", filename, err)
 	}
 
 	return nil
 }
 
-func removeExtractedTests(filename string, extractedTests []TestFunction, fset *token.FileSet) error {
-	// Re-parse the file to get a clean AST
-	src, err := os.ReadFile(filename)
-	if err != nil {
-		return fmt.Errorf("failed to read file: %w", err)
-	}
+func extractPublicFunctions(node *ast.File) []PublicFunction {
+	var publicFuncs []PublicFunction
 
-	node, err := parser.ParseFile(fset, filename, src, parser.ParseComments)
-	if err != nil {
-		return fmt.Errorf("failed to parse file: %w", err)
-	}
-
-	// Create a map of extracted test names for quick lookup
-	extractedNames := make(map[string]bool)
-	for _, test := range extractedTests {
-		extractedNames[test.Name] = true
-	}
-
-	// Filter out the extracted tests from declarations
-	var newDecls []ast.Decl
-	hasRemainingContent := false
-	for _, decl := range node.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok {
-			if extractedNames[fn.Name.Name] {
-				// Skip this function as it was extracted
-				continue
-			}
-			// This is a function that wasn't extracted
-			hasRemainingContent = true
-			newDecls = append(newDecls, decl)
-		} else if genDecl, ok := decl.(*ast.GenDecl); ok {
-			// Check if this is an import declaration
-			if genDecl.Tok == token.IMPORT {
-				// Keep imports only if there's other remaining content
-				// We'll add them back later if needed
-				continue
-			}
-			// Non-import GenDecl (types, vars, consts)
-			hasRemainingContent = true
-			newDecls = append(newDecls, decl)
-		}
-	}
-
-	// Also track positions of extracted functions to remove orphaned comments
-	extractedPositions := make(map[token.Pos]bool)
-	for _, decl := range node.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok {
-			if extractedNames[fn.Name.Name] {
-				extractedPositions[fn.Pos()] = true
-			}
-		}
-	}
-
-	// Remove orphaned comments by filtering node.Comments
-	node.Comments = filterOrphanedComments(node, extractedNames)
-
-	// If there's no remaining content, delete the file
-	if !hasRemainingContent || len(newDecls) == 0 {
-		if err := os.Remove(filename); err != nil {
-			return fmt.Errorf("failed to delete empty file: %w", err)
-		}
-		fmt.Printf("Deleted original (now empty): %s\n", filename)
-
-		return nil
-	}
-
-	// Filter imports to only include used ones
-	usedImports := findUsedImportsInDecls(newDecls, node.Imports)
-
-	// Re-add only used imports if there's remaining content
-	var finalDecls []ast.Decl
-	if len(usedImports) > 0 {
-		importDecl := &ast.GenDecl{
-			Tok:   token.IMPORT,
-			Specs: make([]ast.Spec, len(usedImports)),
-		}
-		for i, imp := range usedImports {
-			importDecl.Specs[i] = imp
-		}
-		finalDecls = append(finalDecls, importDecl)
-	}
-	finalDecls = append(finalDecls, newDecls...)
-	node.Decls = finalDecls
-
-	// Format and write back to file
-	var buf strings.Builder
-	if err := format.Node(&buf, fset, node); err != nil {
-		return fmt.Errorf("failed to format code: %w", err)
-	}
-
-	if err := os.WriteFile(filename, []byte(buf.String()), 0o600); err != nil {
-		return fmt.Errorf("failed to write file: %w", err)
-	}
-
-	return nil
-}
-
-func filterOrphanedComments(node *ast.File, extractedNames map[string]bool) []*ast.CommentGroup {
-	var filteredComments []*ast.CommentGroup
-	for _, cg := range node.Comments {
-		if shouldKeepComment(cg, node, extractedNames) {
-			filteredComments = append(filteredComments, cg)
-		}
-	}
-
-	return filteredComments
-}
-
-func shouldKeepComment(cg *ast.CommentGroup, node *ast.File, extractedNames map[string]bool) bool {
-	// Check if this comment group was associated with an extracted function
 	for _, decl := range node.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || !extractedNames[fn.Name.Name] {
+		if !ok || fn.Recv != nil {
 			continue
 		}
 
-		// If the comment is the doc comment for an extracted function, remove it
-		if fn.Doc == cg {
-			return false
+		// Check if function is public (starts with uppercase)
+		if !unicode.IsUpper(rune(fn.Name.Name[0])) {
+			continue
 		}
 
-		// Check if comment belongs to the extracted function (including before and after comments)
-		if isTestSpecificComment(cg, fn, node.Decls) {
-			return false
+		var standaloneComments []*ast.CommentGroup
+		for _, cg := range node.Comments {
+			if cg == fn.Doc {
+				continue
+			}
+			if isFunctionSpecificComment(cg, fn, node.Decls) {
+				standaloneComments = append(standaloneComments, cg)
+			}
 		}
 
-		// Also remove comments inside the extracted function body
-		if fn.Body != nil && cg.Pos() >= fn.Body.Lbrace && cg.End() <= fn.Body.Rbrace {
-			return false
+		publicFunc := PublicFunction{
+			Name:               fn.Name.Name,
+			FuncDecl:           fn,
+			Comments:           fn.Doc,
+			StandaloneComments: standaloneComments,
+			Imports:            node.Imports,
+			Package:            node.Name.Name,
+		}
+		publicFuncs = append(publicFuncs, publicFunc)
+	}
+
+	return publicFuncs
+}
+
+func extractPublicDeclarations(node *ast.File) []PublicDeclaration {
+	var publicDecls []PublicDeclaration
+
+	for _, decl := range node.Decls {
+		genDecl, ok := decl.(*ast.GenDecl)
+		if !ok || genDecl.Tok == token.IMPORT {
+			continue
+		}
+
+		// Check if this declaration contains any public const/var
+		hasPublic := false
+		for _, spec := range genDecl.Specs {
+			switch s := spec.(type) {
+			case *ast.ValueSpec:
+				for _, name := range s.Names {
+					if unicode.IsUpper(rune(name.Name[0])) {
+						hasPublic = true
+
+						break
+					}
+				}
+			}
+			if hasPublic {
+				break
+			}
+		}
+
+		if hasPublic {
+			publicDecl := PublicDeclaration{
+				GenDecl:  genDecl,
+				Comments: genDecl.Doc,
+				Package:  node.Name.Name,
+				Imports:  node.Imports,
+			}
+			publicDecls = append(publicDecls, publicDecl)
 		}
 	}
 
-	return true
+	return publicDecls
 }
 
-// This only returns true for standalone comments that should be included with the test.
-func isTestSpecificComment(cg *ast.CommentGroup, fn *ast.FuncDecl, allDecls []ast.Decl) bool {
-	// Skip if comment is inside the function body itself - these are handled automatically
+func extractTestFunctions(node *ast.File) []TestFunction {
+	var tests []TestFunction
+
+	for _, decl := range node.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Recv != nil {
+			continue
+		}
+
+		if !strings.HasPrefix(fn.Name.Name, "Test") {
+			continue
+		}
+
+		// Check if the character after "Test" (and any underscores) is uppercase
+		nameAfterTest := strings.TrimPrefix(fn.Name.Name, "Test")
+		nameAfterTest = strings.TrimLeft(nameAfterTest, "_")
+
+		// Skip if empty or starts with lowercase
+		if len(nameAfterTest) == 0 || unicode.IsLower(rune(nameAfterTest[0])) {
+			continue
+		}
+
+		var standaloneComments []*ast.CommentGroup
+		for _, cg := range node.Comments {
+			if cg == fn.Doc {
+				continue
+			}
+			if isFunctionSpecificComment(cg, fn, node.Decls) {
+				standaloneComments = append(standaloneComments, cg)
+			}
+		}
+
+		test := TestFunction{
+			Name:               fn.Name.Name,
+			FuncDecl:           fn,
+			Comments:           fn.Doc,
+			StandaloneComments: standaloneComments,
+			Imports:            node.Imports,
+			Package:            node.Name.Name,
+		}
+		tests = append(tests, test)
+	}
+
+	return tests
+}
+
+type TestFunction struct {
+	Name               string
+	FuncDecl           *ast.FuncDecl
+	Comments           *ast.CommentGroup
+	StandaloneComments []*ast.CommentGroup
+	Imports            []*ast.ImportSpec
+	Package            string
+}
+
+func isFunctionSpecificComment(cg *ast.CommentGroup, fn *ast.FuncDecl, allDecls []ast.Decl) bool {
+	// Skip if comment is inside the function body
 	if fn.Body != nil && cg.Pos() >= fn.Body.Lbrace && cg.End() <= fn.Body.Rbrace {
-		// Comments inside the function body are handled automatically by format.Node
 		return false
 	}
 
@@ -287,7 +382,6 @@ func isTestSpecificComment(cg *ast.CommentGroup, fn *ast.FuncDecl, allDecls []as
 
 	// Check comments before the function
 	if cg.End() >= fn.Pos() {
-		// Comments after functions stay in the original file
 		if fn.Body != nil && cg.Pos() > fn.Body.Rbrace {
 			return false
 		}
@@ -323,103 +417,65 @@ func isTestSpecificComment(cg *ast.CommentGroup, fn *ast.FuncDecl, allDecls []as
 	}
 
 	// Comment belongs to this function if it's after the previous declaration
-	// and reasonably close to the function (within 50 lines)
+	// and reasonably close to the function
 	return cg.Pos() > prevDeclEnd && fn.Pos()-cg.End() < token.Pos(50*80)
 }
 
-func extractTestFunctions(node *ast.File) ([]TestFunction, bool) {
-	tests := make([]TestFunction, 0, len(node.Decls))
-	hasRemainingContent := false
-
-	// Map function positions to indices for finding standalone comments
-	funcPositions := make(map[token.Pos]int)
-	for i, decl := range node.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok {
-			funcPositions[fn.Pos()] = i
-		}
-	}
-
-	for _, decl := range node.Decls {
-		fn, isFuncDecl := decl.(*ast.FuncDecl)
-		if !isFuncDecl {
-			if _, ok := decl.(*ast.GenDecl); ok {
-				// Type declarations, constants, variables should be preserved
-				hasRemainingContent = true
-			}
-
-			continue
-		}
-
-		if !strings.HasPrefix(fn.Name.Name, "Test") || fn.Recv != nil {
-			if fn.Recv == nil {
-				// Non-test functions (helper functions) should be preserved
-				hasRemainingContent = true
-			}
-
-			continue
-		}
-
-		// Check if the character after "Test" (and any underscores) is uppercase
-		nameAfterTest := strings.TrimPrefix(fn.Name.Name, "Test")
-		nameAfterTest = strings.TrimLeft(nameAfterTest, "_")
-
-		// Skip if empty or starts with lowercase (e.g., Test_foo)
-		if len(nameAfterTest) == 0 || unicode.IsLower(rune(nameAfterTest[0])) {
-			hasRemainingContent = true
-
-			continue
-		}
-
-		// Find standalone comments that belong to this function
-		var standaloneComments []*ast.CommentGroup
-		for _, cg := range node.Comments {
-			// Skip if this is the doc comment
-			if cg == fn.Doc {
-				continue
-			}
-
-			// Only include comments that are specifically for this test function
-			// and not for other functions or general file comments
-			if isTestSpecificComment(cg, fn, node.Decls) {
-				standaloneComments = append(standaloneComments, cg)
-			}
-		}
-
-		test := TestFunction{
-			Name:               fn.Name.Name,
-			FuncDecl:           fn,
-			Comments:           fn.Doc,
-			StandaloneComments: standaloneComments,
-			Imports:            node.Imports,
-			Package:            node.Name.Name,
-		}
-		tests = append(tests, test)
-	}
-
-	return tests, hasRemainingContent
-}
-
-func writeTestFile(filename string, test TestFunction, fset *token.FileSet) error {
-	// Build declarations: imports first, then the test function
+func writePublicFunction(filename string, fn PublicFunction, fset *token.FileSet) error {
 	var decls []ast.Decl
 
-	// Find which imports are actually used in this test function
+	// Find which imports are actually used
+	usedImports := findUsedImports(fn.FuncDecl, fn.Imports)
+
+	// Add import declarations if there are any used imports
+	if len(usedImports) > 0 {
+		importDecl := &ast.GenDecl{
+			Tok:   token.IMPORT,
+			Specs: make([]ast.Spec, len(usedImports)),
+		}
+		for i, imp := range usedImports {
+			importDecl.Specs[i] = imp
+		}
+		decls = append(decls, importDecl)
+	}
+
+	// Add the function with its comments
+	if fn.Comments != nil {
+		fn.FuncDecl.Doc = fn.Comments
+	}
+	decls = append(decls, fn.FuncDecl)
+
+	// Create an AST file
+	astFile := &ast.File{
+		Name:     &ast.Ident{Name: fn.Package},
+		Decls:    decls,
+		Comments: fn.StandaloneComments,
+	}
+
+	// Format and write to file
+	if err := formatAndWriteFile(filename, astFile, fset); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func writeTestFunction(filename string, test TestFunction, fset *token.FileSet) error {
+	var decls []ast.Decl
+
+	// Find which imports are actually used
 	usedImports := findUsedImports(test.FuncDecl, test.Imports)
 
 	// Add import declarations if there are any used imports
 	if len(usedImports) > 0 {
-		decls = append(decls, &ast.GenDecl{
+		importDecl := &ast.GenDecl{
 			Tok:   token.IMPORT,
 			Specs: make([]ast.Spec, len(usedImports)),
-		})
-		// Copy import specs
-		for i, imp := range usedImports {
-			genDecl, ok := decls[0].(*ast.GenDecl)
-			if !ok {
-				return ErrTypeCast
-			}
-			genDecl.Specs[i] = imp
 		}
+		for i, imp := range usedImports {
+			importDecl.Specs[i] = imp
+		}
+		decls = append(decls, importDecl)
 	}
 
 	// Add the test function with its comments
@@ -428,20 +484,92 @@ func writeTestFile(filename string, test TestFunction, fset *token.FileSet) erro
 	}
 	decls = append(decls, test.FuncDecl)
 
-	// Create an AST file with the test function and imports
+	// Create an AST file
 	astFile := &ast.File{
 		Name:     &ast.Ident{Name: test.Package},
 		Decls:    decls,
-		Comments: test.StandaloneComments, // Include standalone comments
+		Comments: test.StandaloneComments,
 	}
 
-	// Format the source code
+	// Format and write to file
+	if err := formatAndWriteFile(filename, astFile, fset); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func writeCommonFile(filename string, decls []PublicDeclaration, pkgName string, imports []*ast.ImportSpec, fset *token.FileSet) error {
+	var astDecls []ast.Decl
+
+	// Collect all used imports from declarations
+	usedPackages := make(map[string]bool)
+	for _, decl := range decls {
+		ast.Inspect(decl.GenDecl, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.SelectorExpr:
+				if ident, ok := x.X.(*ast.Ident); ok {
+					usedPackages[ident.Name] = true
+				}
+			}
+
+			return true
+		})
+	}
+
+	// Filter and add imports
+	var usedImports []*ast.ImportSpec
+	for _, imp := range imports {
+		importPath := strings.Trim(imp.Path.Value, `"`)
+		var pkgNameFromImport string
+		if imp.Name != nil {
+			pkgNameFromImport = imp.Name.Name
+		} else {
+			parts := strings.Split(importPath, "/")
+			pkgNameFromImport = parts[len(parts)-1]
+		}
+
+		if usedPackages[pkgNameFromImport] {
+			usedImports = append(usedImports, imp)
+		}
+	}
+
+	if len(usedImports) > 0 {
+		importDecl := &ast.GenDecl{
+			Tok:   token.IMPORT,
+			Specs: make([]ast.Spec, len(usedImports)),
+		}
+		for i, imp := range usedImports {
+			importDecl.Specs[i] = imp
+		}
+		astDecls = append(astDecls, importDecl)
+	}
+
+	// Add all public declarations
+	for _, decl := range decls {
+		astDecls = append(astDecls, decl.GenDecl)
+	}
+
+	// Create an AST file
+	astFile := &ast.File{
+		Name:  &ast.Ident{Name: pkgName},
+		Decls: astDecls,
+	}
+
+	// Format and write to file
+	if err := formatAndWriteFile(filename, astFile, fset); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func formatAndWriteFile(filename string, astFile *ast.File, fset *token.FileSet) error {
 	var buf strings.Builder
 	if err := format.Node(&buf, fset, astFile); err != nil {
 		return fmt.Errorf("failed to format code: %w", err)
 	}
 
-	// Write the formatted code to file
 	if err := os.WriteFile(filename, []byte(buf.String()), 0o600); err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
@@ -449,43 +577,293 @@ func writeTestFile(filename string, test TestFunction, fset *token.FileSet) erro
 	return nil
 }
 
-func findUsedImports(fn *ast.FuncDecl, allImports []*ast.ImportSpec) []*ast.ImportSpec {
-	usedPackages := make(map[string]bool)
+func updateOriginalFile(filename string, extractedFuncs []PublicFunction, extractedDecls []PublicDeclaration, fset *token.FileSet) error {
+	src, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
 
-	// Always include "testing" package for test functions
-	usedPackages["testing"] = true
+	node, err := parser.ParseFile(fset, filename, src, parser.ParseComments)
+	if err != nil {
+		return fmt.Errorf("failed to parse file: %w", err)
+	}
 
-	// Walk through the function body to find used packages
-	ast.Inspect(fn, func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.SelectorExpr:
-			// e.g., fmt.Println, strings.HasPrefix
-			if ident, ok := x.X.(*ast.Ident); ok {
-				usedPackages[ident.Name] = true
+	// Create maps for quick lookup
+	extractedFuncNames := make(map[string]bool)
+	for _, fn := range extractedFuncs {
+		extractedFuncNames[fn.Name] = true
+	}
+
+	extractedDeclPtrs := make(map[*ast.GenDecl]bool)
+	for _, decl := range extractedDecls {
+		extractedDeclPtrs[decl.GenDecl] = true
+	}
+
+	// Filter declarations
+	var newDecls []ast.Decl
+	hasRemainingContent := false
+
+	for _, decl := range node.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			// Keep private functions and methods
+			if !extractedFuncNames[d.Name.Name] {
+				newDecls = append(newDecls, decl)
+				hasRemainingContent = true
 			}
-		case *ast.CallExpr:
-			// Check for type assertions and conversions that might use imported types
-			if ident, ok := x.Fun.(*ast.Ident); ok {
-				usedPackages[ident.Name] = true
+		case *ast.GenDecl:
+			if d.Tok == token.IMPORT {
+				continue // We'll re-add imports later if needed
 			}
-		case *ast.Ident:
-			// Check for types from imported packages
-			// This is a simplified check - might need refinement for complex cases
-			if x.Obj == nil && x.Name != "" {
-				// Could be a package-level identifier
-				usedPackages[x.Name] = true
+			// Keep private declarations
+			if !extractedDeclPtrs[d] {
+				// Check if this declaration has any private members
+				hasPrivate := false
+				for _, spec := range d.Specs {
+					if vs, ok := spec.(*ast.ValueSpec); ok {
+						for _, name := range vs.Names {
+							if !unicode.IsUpper(rune(name.Name[0])) {
+								hasPrivate = true
+
+								break
+							}
+						}
+					}
+				}
+				if hasPrivate {
+					newDecls = append(newDecls, decl)
+					hasRemainingContent = true
+				}
 			}
 		}
+	}
 
-		return true
-	})
+	// If no remaining content, delete the file
+	if !hasRemainingContent || len(newDecls) == 0 {
+		if err := os.Remove(filename); err != nil {
+			return fmt.Errorf("failed to delete empty file: %w", err)
+		}
+		fmt.Printf("Deleted original (now empty): %s\n", filename)
 
-	// Filter imports to only include used ones
-	var result []*ast.ImportSpec
+		return nil
+	}
+
+	// Find used imports in remaining declarations
+	usedImports := findUsedImportsInDecls(newDecls, node.Imports)
+
+	// Re-add only used imports
+	var finalDecls []ast.Decl
+	if len(usedImports) > 0 {
+		importDecl := &ast.GenDecl{
+			Tok:   token.IMPORT,
+			Specs: make([]ast.Spec, len(usedImports)),
+		}
+		for i, imp := range usedImports {
+			importDecl.Specs[i] = imp
+		}
+		finalDecls = append(finalDecls, importDecl)
+	}
+	finalDecls = append(finalDecls, newDecls...)
+
+	node.Decls = finalDecls
+
+	// Format and write back
+	var buf strings.Builder
+	if err := format.Node(&buf, fset, node); err != nil {
+		return fmt.Errorf("failed to format code: %w", err)
+	}
+
+	if err := os.WriteFile(filename, []byte(buf.String()), 0o600); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+
+	fmt.Printf("Updated original: %s (preserved private content)\n", filename)
+
+	return nil
+}
+
+func removeExtractedTests(filename string, extractedTests []TestFunction, fset *token.FileSet) error {
+	src, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+
+	node, err := parser.ParseFile(fset, filename, src, parser.ParseComments)
+	if err != nil {
+		return fmt.Errorf("failed to parse file: %w", err)
+	}
+
+	// Create a map of extracted test names
+	extractedNames := make(map[string]bool)
+	for _, test := range extractedTests {
+		extractedNames[test.Name] = true
+	}
+
+	// Filter out the extracted tests
+	var newDecls []ast.Decl
+	hasRemainingContent := false
+	for _, decl := range node.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			if extractedNames[fn.Name.Name] {
+				continue
+			}
+			hasRemainingContent = true
+			newDecls = append(newDecls, decl)
+		} else if genDecl, ok := decl.(*ast.GenDecl); ok {
+			if genDecl.Tok == token.IMPORT {
+				continue
+			}
+			hasRemainingContent = true
+			newDecls = append(newDecls, decl)
+		}
+	}
+
+	// If no remaining content, delete the file
+	if !hasRemainingContent || len(newDecls) == 0 {
+		if err := os.Remove(filename); err != nil {
+			return fmt.Errorf("failed to delete empty file: %w", err)
+		}
+		fmt.Printf("Deleted original (now empty): %s\n", filename)
+
+		return nil
+	}
+
+	// Find used imports in remaining declarations
+	usedImports := findUsedImportsInDecls(newDecls, node.Imports)
+
+	// Re-add only used imports
+	var finalDecls []ast.Decl
+	if len(usedImports) > 0 {
+		importDecl := &ast.GenDecl{
+			Tok:   token.IMPORT,
+			Specs: make([]ast.Spec, len(usedImports)),
+		}
+		for i, imp := range usedImports {
+			importDecl.Specs[i] = imp
+		}
+		finalDecls = append(finalDecls, importDecl)
+	}
+	finalDecls = append(finalDecls, newDecls...)
+
+	node.Decls = finalDecls
+
+	// Format and write back
+	var buf strings.Builder
+	if err := format.Node(&buf, fset, node); err != nil {
+		return fmt.Errorf("failed to format code: %w", err)
+	}
+
+	if err := os.WriteFile(filename, []byte(buf.String()), 0o600); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+
+	fmt.Printf("Preserved original: %s (contains non-split tests or helper functions)\n", filename)
+
+	return nil
+}
+
+func findCorrespondingTestFile(filename string, functionName string) string {
+	dir := filepath.Dir(filename)
+	base := filepath.Base(filename)
+	base = strings.TrimSuffix(base, ".go")
+	testFile := filepath.Join(dir, base+"_test.go")
+
+	if _, err := os.Stat(testFile); err == nil {
+		return testFile
+	}
+
+	return ""
+}
+
+func splitTestForFunction(testFile string, functionName string, outputDir string) error {
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, testFile, nil, parser.ParseComments)
+	if err != nil {
+		return fmt.Errorf("failed to parse test file: %w", err)
+	}
+
+	// Find test functions that match the public function name
+	var matchingTests []TestFunction
+	for _, decl := range node.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Recv != nil {
+			continue
+		}
+
+		// Check if test name contains the function name
+		if strings.Contains(fn.Name.Name, functionName) {
+			var standaloneComments []*ast.CommentGroup
+			for _, cg := range node.Comments {
+				if cg == fn.Doc {
+					continue
+				}
+				if isFunctionSpecificComment(cg, fn, node.Decls) {
+					standaloneComments = append(standaloneComments, cg)
+				}
+			}
+
+			test := TestFunction{
+				Name:               fn.Name.Name,
+				FuncDecl:           fn,
+				Comments:           fn.Doc,
+				StandaloneComments: standaloneComments,
+				Imports:            node.Imports,
+				Package:            node.Name.Name,
+			}
+			matchingTests = append(matchingTests, test)
+		}
+	}
+
+	// Write matching tests to new file
+	if len(matchingTests) > 0 {
+		snakeCaseName := functionNameToSnakeCase(functionName)
+		outputFileName := snakeCaseName + "_test.go"
+		outputFile := filepath.Join(outputDir, outputFileName)
+
+		// Write all matching tests to the same file
+		if err := writeTestsToFile(outputFile, matchingTests, fset); err != nil {
+			return fmt.Errorf("failed to write test file: %w", err)
+		}
+		fmt.Printf("Created test file: %s\n", outputFile)
+
+		// Remove the extracted tests from the original test file
+		if err := removeExtractedTests(testFile, matchingTests, fset); err != nil {
+			return fmt.Errorf("failed to update original test file: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func writeTestsToFile(filename string, tests []TestFunction, fset *token.FileSet) error {
+	if len(tests) == 0 {
+		return nil
+	}
+
+	var decls []ast.Decl
+
+	// Collect all imports needed
+	allImports := tests[0].Imports
+	usedPackages := make(map[string]bool)
+	usedPackages["testing"] = true
+
+	for _, test := range tests {
+		ast.Inspect(test.FuncDecl, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.SelectorExpr:
+				if ident, ok := x.X.(*ast.Ident); ok {
+					usedPackages[ident.Name] = true
+				}
+			}
+
+			return true
+		})
+	}
+
+	// Add import declarations
+	var usedImports []*ast.ImportSpec
 	for _, imp := range allImports {
 		importPath := strings.Trim(imp.Path.Value, `"`)
-
-		// Get the package name (last part of import path or alias)
 		var pkgName string
 		if imp.Name != nil {
 			pkgName = imp.Name.Name
@@ -494,17 +872,94 @@ func findUsedImports(fn *ast.FuncDecl, allImports []*ast.ImportSpec) []*ast.Impo
 			pkgName = parts[len(parts)-1]
 		}
 
-		// Check if this import should be included
-		switch {
-		case importPath == "testing" && usedPackages["testing"]:
+		if importPath == "testing" || usedPackages[pkgName] {
+			usedImports = append(usedImports, imp)
+		}
+	}
+
+	if len(usedImports) > 0 {
+		importDecl := &ast.GenDecl{
+			Tok:   token.IMPORT,
+			Specs: make([]ast.Spec, len(usedImports)),
+		}
+		for i, imp := range usedImports {
+			importDecl.Specs[i] = imp
+		}
+		decls = append(decls, importDecl)
+	}
+
+	// Add all test functions
+	for _, test := range tests {
+		if test.Comments != nil {
+			test.FuncDecl.Doc = test.Comments
+		}
+		decls = append(decls, test.FuncDecl)
+	}
+
+	// Create an AST file
+	astFile := &ast.File{
+		Name:  &ast.Ident{Name: tests[0].Package},
+		Decls: decls,
+	}
+
+	// Format and write to file
+	if err := formatAndWriteFile(filename, astFile, fset); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func findUsedImports(fn *ast.FuncDecl, allImports []*ast.ImportSpec) []*ast.ImportSpec {
+	usedPackages := make(map[string]bool)
+
+	// Walk through the function body to find used packages
+	ast.Inspect(fn, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.SelectorExpr:
+			if ident, ok := x.X.(*ast.Ident); ok {
+				usedPackages[ident.Name] = true
+			}
+		case *ast.CallExpr:
+			if ident, ok := x.Fun.(*ast.Ident); ok {
+				usedPackages[ident.Name] = true
+			}
+		case *ast.Ident:
+			if x.Obj == nil && x.Name != "" {
+				usedPackages[x.Name] = true
+			}
+		}
+
+		return true
+	})
+
+	// For test functions, always include "testing"
+	if strings.HasPrefix(fn.Name.Name, "Test") || strings.HasPrefix(fn.Name.Name, "Benchmark") {
+		usedPackages["testing"] = true
+	}
+
+	// Filter imports to only include used ones
+	var result []*ast.ImportSpec
+	for _, imp := range allImports {
+		importPath := strings.Trim(imp.Path.Value, `"`)
+
+		var pkgName string
+		if imp.Name != nil {
+			pkgName = imp.Name.Name
+		} else {
+			parts := strings.Split(importPath, "/")
+			pkgName = parts[len(parts)-1]
+		}
+
+		if importPath == "testing" && usedPackages["testing"] {
 			result = append(result, imp)
-		case usedPackages[pkgName]:
+		} else if usedPackages[pkgName] {
 			result = append(result, imp)
-		case strings.Contains(importPath, "testify/assert") && usedPackages["assert"]:
+		} else if strings.Contains(importPath, "testify/assert") && usedPackages["assert"] {
 			result = append(result, imp)
-		case strings.Contains(importPath, "testify/require") && usedPackages["require"]:
+		} else if strings.Contains(importPath, "testify/require") && usedPackages["require"] {
 			result = append(result, imp)
-		case strings.Contains(importPath, "testify/suite") && usedPackages["suite"]:
+		} else if strings.Contains(importPath, "testify/suite") && usedPackages["suite"] {
 			result = append(result, imp)
 		}
 	}
@@ -515,7 +970,7 @@ func findUsedImports(fn *ast.FuncDecl, allImports []*ast.ImportSpec) []*ast.Impo
 func findUsedImportsInDecls(decls []ast.Decl, allImports []*ast.ImportSpec) []*ast.ImportSpec {
 	usedPackages := make(map[string]bool)
 
-	// Always include "testing" package if there are test-related functions
+	// Check for test functions
 	for _, decl := range decls {
 		if fn, ok := decl.(*ast.FuncDecl); ok {
 			if strings.HasPrefix(fn.Name.Name, "Test") || strings.HasPrefix(fn.Name.Name, "Benchmark") || strings.HasPrefix(fn.Name.Name, "Example") {
@@ -531,20 +986,15 @@ func findUsedImportsInDecls(decls []ast.Decl, allImports []*ast.ImportSpec) []*a
 		ast.Inspect(decl, func(n ast.Node) bool {
 			switch x := n.(type) {
 			case *ast.SelectorExpr:
-				// e.g., fmt.Println, strings.HasPrefix
 				if ident, ok := x.X.(*ast.Ident); ok {
 					usedPackages[ident.Name] = true
 				}
 			case *ast.CallExpr:
-				// Check for type assertions and conversions that might use imported types
 				if ident, ok := x.Fun.(*ast.Ident); ok {
 					usedPackages[ident.Name] = true
 				}
 			case *ast.Ident:
-				// Check for types from imported packages
-				// This is a simplified check - might need refinement for complex cases
 				if x.Obj == nil && x.Name != "" {
-					// Could be a package-level identifier
 					usedPackages[x.Name] = true
 				}
 			}
@@ -558,7 +1008,6 @@ func findUsedImportsInDecls(decls []ast.Decl, allImports []*ast.ImportSpec) []*a
 	for _, imp := range allImports {
 		importPath := strings.Trim(imp.Path.Value, `"`)
 
-		// Get the package name (last part of import path or alias)
 		var pkgName string
 		if imp.Name != nil {
 			pkgName = imp.Name.Name
@@ -567,17 +1016,15 @@ func findUsedImportsInDecls(decls []ast.Decl, allImports []*ast.ImportSpec) []*a
 			pkgName = parts[len(parts)-1]
 		}
 
-		// Check if this import should be included
-		switch {
-		case importPath == "testing" && usedPackages["testing"]:
+		if importPath == "testing" && usedPackages["testing"] {
 			result = append(result, imp)
-		case usedPackages[pkgName]:
+		} else if usedPackages[pkgName] {
 			result = append(result, imp)
-		case strings.Contains(importPath, "testify/assert") && usedPackages["assert"]:
+		} else if strings.Contains(importPath, "testify") && usedPackages["assert"] {
 			result = append(result, imp)
-		case strings.Contains(importPath, "testify/require") && usedPackages["require"]:
+		} else if strings.Contains(importPath, "testify") && usedPackages["require"] {
 			result = append(result, imp)
-		case strings.Contains(importPath, "testify/suite") && usedPackages["suite"]:
+		} else if strings.Contains(importPath, "testify") && usedPackages["suite"] {
 			result = append(result, imp)
 		}
 	}
@@ -585,81 +1032,8 @@ func findUsedImportsInDecls(decls []ast.Decl, allImports []*ast.ImportSpec) []*a
 	return result
 }
 
-// getCommonAbbreviations returns common abbreviations and Go keywords that should not be split.
-func getCommonAbbreviations() []string {
-	return []string{
-		"ID", "UUID", "URL", "URI", "API", "HTTP", "HTTPS", "JSON", "XML", "CSV",
-		"SQL", "DB", "TCP", "UDP", "IP", "DNS", "SSH", "TLS", "SSL", "JWT",
-		"AWS", "GCP", "CPU", "GPU", "RAM", "ROM", "IO", "EOF", "TTL", "CDN",
-		"HTML", "CSS", "JS", "MD5", "SHA", "RSA", "AES", "UTF", "ASCII",
-		"CRUD", "REST", "RPC", "GRPC", "MQTT", "AMQP", "SMTP", "IMAP", "POP",
-		"SDK", "CLI", "GUI", "UI", "UX", "OS", "VM", "PDF", "PNG", "JPG", "GIF",
-	}
-}
-
-// matchesAbbreviation checks if the substring at position i matches any known abbreviation.
-func matchesAbbreviation(runes []rune, i int) (string, int) {
-	commonAbbreviations := getCommonAbbreviations()
-	for _, abbr := range commonAbbreviations {
-		if i+len(abbr) > len(runes) {
-			continue
-		}
-
-		substr := string(runes[i : i+len(abbr)])
-		if strings.ToUpper(substr) != abbr {
-			continue
-		}
-
-		// Check if it's a word boundary (next char is uppercase or end of string)
-		atWordBoundary := i+len(abbr) == len(runes) ||
-			(i+len(abbr) < len(runes) && unicode.IsUpper(runes[i+len(abbr)]))
-
-		if atWordBoundary {
-			return abbr, len(abbr)
-		}
-	}
-
-	return "", 0
-}
-
-// shouldAddUnderscore checks if an underscore should be added before the current character.
-func shouldAddUnderscore(runes []rune, i int, result []rune) bool {
-	if i == 0 || !unicode.IsUpper(runes[i]) {
-		return false
-	}
-
-	if len(result) == 0 || result[len(result)-1] == '_' {
-		return false
-	}
-
-	// Uppercase followed by lowercase (e.g., "Name" in "UserName")
-	if i+1 < len(runes) && unicode.IsLower(runes[i+1]) {
-		return true
-	}
-
-	// Lowercase followed by uppercase (e.g., "N" in "userName")
-	if i > 0 && unicode.IsLower(runes[i-1]) {
-		return true
-	}
-
-	return false
-}
-
-func testNameToSnakeCase(name string) string {
-	if !strings.HasPrefix(name, "Test") {
-		return strings.ToLower(name)
-	}
-
-	name = strings.TrimPrefix(name, "Test")
-
-	// Remove leading underscores first
-	name = strings.TrimLeft(name, "_")
-
-	if name == "" {
-		return "test"
-	}
-
-	// Check if the entire name (after Test prefix) is a common abbreviation
+func functionNameToSnakeCase(name string) string {
+	// Handle common abbreviations
 	commonAbbreviations := getCommonAbbreviations()
 	for _, abbr := range commonAbbreviations {
 		if strings.ToUpper(name) == abbr {
@@ -667,7 +1041,6 @@ func testNameToSnakeCase(name string) string {
 		}
 	}
 
-	// Process the name character by character, handling abbreviations
 	result := make([]rune, 0, len(name)*2)
 	runes := []rune(name)
 
@@ -682,7 +1055,63 @@ func testNameToSnakeCase(name string) string {
 			for _, r := range strings.ToLower(abbr) {
 				result = append(result, r)
 			}
-			i += length - 1 // -1 because the loop will increment
+			i += length - 1
+
+			continue
+		}
+
+		// Handle regular character
+		r := runes[i]
+		if shouldAddUnderscore(runes, i, result) {
+			result = append(result, '_')
+		}
+		result = append(result, unicode.ToLower(r))
+	}
+
+	resultStr := string(result)
+	if resultStr == "" {
+		return "func"
+	}
+
+	// Remove leading underscore if present
+	return strings.TrimLeft(resultStr, "_")
+}
+
+func testNameToSnakeCase(name string) string {
+	if !strings.HasPrefix(name, "Test") {
+		return strings.ToLower(name)
+	}
+
+	name = strings.TrimPrefix(name, "Test")
+	name = strings.TrimLeft(name, "_")
+
+	if name == "" {
+		return "test"
+	}
+
+	// Check if the entire name is a common abbreviation
+	commonAbbreviations := getCommonAbbreviations()
+	for _, abbr := range commonAbbreviations {
+		if strings.ToUpper(name) == abbr {
+			return strings.ToLower(name)
+		}
+	}
+
+	result := make([]rune, 0, len(name)*2)
+	runes := []rune(name)
+
+	for i := 0; i < len(runes); i++ {
+		// Check if current position starts with a known abbreviation
+		if abbr, length := matchesAbbreviation(runes, i); abbr != "" {
+			// Add underscore before abbreviation if needed
+			if i > 0 && len(result) > 0 && result[len(result)-1] != '_' {
+				result = append(result, '_')
+			}
+			// Add the abbreviation in lowercase
+			for _, r := range strings.ToLower(abbr) {
+				result = append(result, r)
+			}
+			i += length - 1
 
 			continue
 		}
@@ -701,4 +1130,61 @@ func testNameToSnakeCase(name string) string {
 	}
 
 	return resultStr
+}
+
+func getCommonAbbreviations() []string {
+	return []string{
+		"ID", "UUID", "URL", "URI", "API", "HTTP", "HTTPS", "JSON", "XML", "CSV",
+		"SQL", "DB", "TCP", "UDP", "IP", "DNS", "SSH", "TLS", "SSL", "JWT",
+		"AWS", "GCP", "CPU", "GPU", "RAM", "ROM", "IO", "EOF", "TTL", "CDN",
+		"HTML", "CSS", "JS", "MD5", "SHA", "RSA", "AES", "UTF", "ASCII",
+		"CRUD", "REST", "RPC", "GRPC", "MQTT", "AMQP", "SMTP", "IMAP", "POP",
+		"SDK", "CLI", "GUI", "UI", "UX", "OS", "VM", "PDF", "PNG", "JPG", "GIF",
+	}
+}
+
+func matchesAbbreviation(runes []rune, i int) (string, int) {
+	commonAbbreviations := getCommonAbbreviations()
+	for _, abbr := range commonAbbreviations {
+		if i+len(abbr) > len(runes) {
+			continue
+		}
+
+		substr := string(runes[i : i+len(abbr)])
+		if strings.ToUpper(substr) != abbr {
+			continue
+		}
+
+		// Check if it's a word boundary
+		atWordBoundary := i+len(abbr) == len(runes) ||
+			(i+len(abbr) < len(runes) && unicode.IsUpper(runes[i+len(abbr)]))
+
+		if atWordBoundary {
+			return abbr, len(abbr)
+		}
+	}
+
+	return "", 0
+}
+
+func shouldAddUnderscore(runes []rune, i int, result []rune) bool {
+	if i == 0 || !unicode.IsUpper(runes[i]) {
+		return false
+	}
+
+	if len(result) == 0 || result[len(result)-1] == '_' {
+		return false
+	}
+
+	// Uppercase followed by lowercase
+	if i+1 < len(runes) && unicode.IsLower(runes[i+1]) {
+		return true
+	}
+
+	// Lowercase followed by uppercase
+	if i > 0 && unicode.IsLower(runes[i-1]) {
+		return true
+	}
+
+	return false
 }
