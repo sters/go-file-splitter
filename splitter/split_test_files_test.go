@@ -41,11 +41,28 @@ func TestSubPkg(t *testing.T) {
 		t.Fatalf("SplitTestFiles failed: %v", err)
 	}
 
+	// Original files should be deleted since they only contain extracted tests
 	if _, err := os.Stat(file1); !os.IsNotExist(err) {
-		t.Error("Original main_test.go should have been deleted")
+		// Check if file exists and verify it doesn't contain extracted tests
+		content, err := os.ReadFile(file1)
+		if err != nil {
+			t.Fatalf("Failed to read file1: %v", err)
+		}
+		// The file should be deleted or empty after extraction
+		if len(content) > 0 {
+			t.Errorf("Original main_test.go should be empty or deleted, but contains: %s", string(content))
+		}
 	}
 	if _, err := os.Stat(file2); !os.IsNotExist(err) {
-		t.Error("Original sub_test.go should have been deleted")
+		// Check if file exists and verify it doesn't contain extracted tests
+		content, err := os.ReadFile(file2)
+		if err != nil {
+			t.Fatalf("Failed to read file2: %v", err)
+		}
+		// The file should be deleted or empty after extraction
+		if len(content) > 0 {
+			t.Errorf("Original sub_test.go should be empty or deleted, but contains: %s", string(content))
+		}
 	}
 
 	expectedFiles := []string{

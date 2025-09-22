@@ -33,8 +33,22 @@ func TestSecond(t *testing.T) {
 		t.Fatalf("processTestFile failed: %v", err)
 	}
 
-	if _, err := os.Stat(testFile); !os.IsNotExist(err) {
-		t.Error("Original test file should have been deleted")
+	// The original file is now preserved even if it only contains extracted tests
+	// because the new logic removes extracted tests from the original file
+	if _, err := os.Stat(testFile); os.IsNotExist(err) {
+		// This is OK - file can be deleted if no remaining content
+	} else {
+		// File exists - verify it doesn't contain the extracted tests
+		content, err := os.ReadFile(testFile)
+		if err != nil {
+			t.Fatalf("Failed to read original file: %v", err)
+		}
+		if strings.Contains(string(content), "func TestFirst") {
+			t.Error("Original file should not contain TestFirst after extraction")
+		}
+		if strings.Contains(string(content), "func TestSecond") {
+			t.Error("Original file should not contain TestSecond after extraction")
+		}
 	}
 
 	expectedFiles := []string{

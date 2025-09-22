@@ -103,7 +103,86 @@ func processTestFile(filename string) error {
 		}
 		fmt.Printf("Deleted original: %s\n", filename)
 	} else {
-		fmt.Printf("Preserved original: %s (contains non-split tests or helper functions)\n", filename)
+		// Remove extracted tests from the original file
+		// removeExtractedTests will delete the file if it becomes empty
+		if err := removeExtractedTests(filename, tests, fset); err != nil {
+			return fmt.Errorf("failed to update original file %s: %w", filename, err)
+		}
+		// Check if file still exists after removal
+		if _, err := os.Stat(filename); !os.IsNotExist(err) {
+			fmt.Printf("Preserved original: %s (contains non-split tests or helper functions)\n", filename)
+		}
+	}
+
+	return nil
+}
+
+func removeExtractedTests(filename string, extractedTests []TestFunction, fset *token.FileSet) error {
+	// Re-parse the file to get a clean AST
+	node, err := parser.ParseFile(fset, filename, nil, parser.ParseComments)
+	if err != nil {
+		return fmt.Errorf("failed to parse file: %w", err)
+	}
+
+	// Create a map of extracted test names for quick lookup
+	extractedNames := make(map[string]bool)
+	for _, test := range extractedTests {
+		extractedNames[test.Name] = true
+	}
+
+	// Filter out the extracted tests from declarations
+	var newDecls []ast.Decl
+	hasRemainingContent := false
+	for _, decl := range node.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			if extractedNames[fn.Name.Name] {
+				// Skip this function as it was extracted
+				continue
+			}
+			// This is a function that wasn't extracted
+			hasRemainingContent = true
+			newDecls = append(newDecls, decl)
+		} else if genDecl, ok := decl.(*ast.GenDecl); ok {
+			// Check if this is an import declaration
+			if genDecl.Tok == token.IMPORT {
+				// Keep imports only if there's other remaining content
+				// We'll add them back later if needed
+				continue
+			}
+			// Non-import GenDecl (types, vars, consts)
+			hasRemainingContent = true
+			newDecls = append(newDecls, decl)
+		}
+	}
+
+	// If there's no remaining content, delete the file
+	if !hasRemainingContent || len(newDecls) == 0 {
+		if err := os.Remove(filename); err != nil {
+			return fmt.Errorf("failed to delete empty file: %w", err)
+		}
+		fmt.Printf("Deleted original (now empty): %s\n", filename)
+		return nil
+	}
+
+	// Re-add imports if there's remaining content
+	var finalDecls []ast.Decl
+	for _, decl := range node.Decls {
+		if genDecl, ok := decl.(*ast.GenDecl); ok && genDecl.Tok == token.IMPORT {
+			finalDecls = append(finalDecls, decl)
+			break
+		}
+	}
+	finalDecls = append(finalDecls, newDecls...)
+	node.Decls = finalDecls
+
+	// Format and write back to file
+	var buf strings.Builder
+	if err := format.Node(&buf, fset, node); err != nil {
+		return fmt.Errorf("failed to format code: %w", err)
+	}
+
+	if err := os.WriteFile(filename, []byte(buf.String()), 0o600); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
 	}
 
 	return nil

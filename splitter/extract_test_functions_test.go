@@ -57,13 +57,18 @@ func (m MyType) TestMethodTest(t *testing.T) {
 		t.Fatalf("Failed to parse source: %v", err)
 	}
 
-	tests := extractTestFunctions(node)
+	tests, hasRemainingContent := extractTestFunctions(node)
 
 	if len(tests) != 4 {
 		t.Errorf("Expected 4 test functions, got %d", len(tests))
 		for _, test := range tests {
 			t.Logf("Found test: %s", test.Name)
 		}
+	}
+
+	// Verify that hasRemainingContent is true because of lowercase tests, helper functions, and types
+	if !hasRemainingContent {
+		t.Error("Expected hasRemainingContent to be true due to lowercase tests, helper functions, and type declarations")
 	}
 
 	expectedNames := []string{"TestExample1", "TestExample2", "Test_Uppercase", "Test___MultiUnderscore"}
