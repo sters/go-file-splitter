@@ -17,11 +17,12 @@ import (
 var ErrTypeCast = errors.New("failed to cast to GenDecl")
 
 type TestFunction struct {
-	Name     string
-	FuncDecl *ast.FuncDecl
-	Comments *ast.CommentGroup
-	Imports  []*ast.ImportSpec
-	Package  string
+	Name               string
+	FuncDecl           *ast.FuncDecl
+	Comments           *ast.CommentGroup
+	StandaloneComments []*ast.CommentGroup // Comments that appear before the function but are not doc comments
+	Imports            []*ast.ImportSpec
+	Package            string
 }
 
 func SplitTestFiles(directory string) error {
@@ -120,7 +121,12 @@ func processTestFile(filename string) error {
 
 func removeExtractedTests(filename string, extractedTests []TestFunction, fset *token.FileSet) error {
 	// Re-parse the file to get a clean AST
-	node, err := parser.ParseFile(fset, filename, nil, parser.ParseComments)
+	src, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+
+	node, err := parser.ParseFile(fset, filename, src, parser.ParseComments)
 	if err != nil {
 		return fmt.Errorf("failed to parse file: %w", err)
 	}
@@ -155,6 +161,19 @@ func removeExtractedTests(filename string, extractedTests []TestFunction, fset *
 			newDecls = append(newDecls, decl)
 		}
 	}
+
+	// Also track positions of extracted functions to remove orphaned comments
+	extractedPositions := make(map[token.Pos]bool)
+	for _, decl := range node.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			if extractedNames[fn.Name.Name] {
+				extractedPositions[fn.Pos()] = true
+			}
+		}
+	}
+
+	// Remove orphaned comments by filtering node.Comments
+	node.Comments = filterOrphanedComments(node, extractedNames)
 
 	// If there's no remaining content, delete the file
 	if !hasRemainingContent || len(newDecls) == 0 {
@@ -191,9 +210,60 @@ func removeExtractedTests(filename string, extractedTests []TestFunction, fset *
 	return nil
 }
 
+func filterOrphanedComments(node *ast.File, extractedNames map[string]bool) []*ast.CommentGroup {
+	var filteredComments []*ast.CommentGroup
+	for _, cg := range node.Comments {
+		if shouldKeepComment(cg, node, extractedNames) {
+			filteredComments = append(filteredComments, cg)
+		}
+	}
+
+	return filteredComments
+}
+
+func shouldKeepComment(cg *ast.CommentGroup, node *ast.File, extractedNames map[string]bool) bool {
+	// Check if this comment group was associated with an extracted function
+	for _, decl := range node.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || !extractedNames[fn.Name.Name] {
+			continue
+		}
+
+		// If the comment is the doc comment for an extracted function, remove it
+		if fn.Doc == cg {
+			return false
+		}
+
+		// Also check if comment is just before the function (orphaned comment)
+		if cg.End()+1 <= fn.Pos() && !hasIntermediateDecl(cg, fn, node.Decls) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func hasIntermediateDecl(cg *ast.CommentGroup, fn *ast.FuncDecl, decls []ast.Decl) bool {
+	for _, d := range decls {
+		if d.Pos() > cg.End() && d.Pos() < fn.Pos() {
+			return true
+		}
+	}
+
+	return false
+}
+
 func extractTestFunctions(node *ast.File) ([]TestFunction, bool) {
 	tests := make([]TestFunction, 0, len(node.Decls))
 	hasRemainingContent := false
+
+	// Map function positions to indices for finding standalone comments
+	funcPositions := make(map[token.Pos]int)
+	for i, decl := range node.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			funcPositions[fn.Pos()] = i
+		}
+	}
 
 	for _, decl := range node.Decls {
 		fn, isFuncDecl := decl.(*ast.FuncDecl)
@@ -226,12 +296,58 @@ func extractTestFunctions(node *ast.File) ([]TestFunction, bool) {
 			continue
 		}
 
+		// Find standalone comments that belong to this function
+		var standaloneComments []*ast.CommentGroup
+		for _, cg := range node.Comments {
+			// Skip if this is the doc comment
+			if cg == fn.Doc {
+				continue
+			}
+
+			// Skip if this comment is inside another function body
+			isInsideOtherFunc := false
+			for _, otherDecl := range node.Decls {
+				if otherFn, ok := otherDecl.(*ast.FuncDecl); ok && otherFn != fn {
+					// Check if comment is inside the other function's body
+					if otherFn.Body != nil && cg.Pos() >= otherFn.Body.Lbrace && cg.End() <= otherFn.Body.Rbrace {
+						isInsideOtherFunc = true
+
+						break
+					}
+				}
+			}
+			if isInsideOtherFunc {
+				continue
+			}
+
+			// Check if this comment is before the function and after the previous declaration
+			if cg.End() < fn.Pos() {
+				// Find if there's another declaration between the comment and this function
+				belongsToThisFunc := true
+				for _, otherDecl := range node.Decls {
+					if otherDecl.Pos() > cg.End() && otherDecl.Pos() < fn.Pos() {
+						belongsToThisFunc = false
+
+						break
+					}
+				}
+
+				if belongsToThisFunc {
+					// Check if comment is reasonably close to the function (within 50 lines)
+					if fn.Pos()-cg.End() < token.Pos(50*80) { // Approximate check
+						standaloneComments = append(standaloneComments, cg)
+					}
+				}
+			}
+		}
+
 		test := TestFunction{
-			Name:     fn.Name.Name,
-			FuncDecl: fn,
-			Comments: fn.Doc,
-			Imports:  node.Imports,
-			Package:  node.Name.Name,
+			Name:               fn.Name.Name,
+			FuncDecl:           fn,
+			Comments:           fn.Doc,
+			StandaloneComments: standaloneComments,
+			Imports:            node.Imports,
+			Package:            node.Name.Name,
 		}
 		tests = append(tests, test)
 	}
@@ -270,8 +386,9 @@ func writeTestFile(filename string, test TestFunction, fset *token.FileSet) erro
 
 	// Create an AST file with the test function and imports
 	astFile := &ast.File{
-		Name:  &ast.Ident{Name: test.Package},
-		Decls: decls,
+		Name:     &ast.Ident{Name: test.Package},
+		Decls:    decls,
+		Comments: test.StandaloneComments, // Include standalone comments
 	}
 
 	// Format the source code
