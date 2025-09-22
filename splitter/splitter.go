@@ -111,6 +111,15 @@ func extractTestFunctions(node *ast.File) []TestFunction {
 	for _, decl := range node.Decls {
 		if fn, ok := decl.(*ast.FuncDecl); ok {
 			if strings.HasPrefix(fn.Name.Name, "Test") && fn.Recv == nil {
+				// Check if the character after "Test" (and any underscores) is uppercase
+				nameAfterTest := strings.TrimPrefix(fn.Name.Name, "Test")
+				nameAfterTest = strings.TrimLeft(nameAfterTest, "_")
+
+				// Skip if empty or starts with lowercase
+				if len(nameAfterTest) == 0 || unicode.IsLower(rune(nameAfterTest[0])) {
+					continue
+				}
+
 				test := TestFunction{
 					Name:     fn.Name.Name,
 					FuncDecl: fn,
@@ -174,6 +183,13 @@ func testNameToSnakeCase(name string) string {
 	}
 
 	name = strings.TrimPrefix(name, "Test")
+
+	// Remove leading underscores first
+	name = strings.TrimLeft(name, "_")
+
+	if name == "" {
+		return "test"
+	}
 
 	result := make([]rune, 0, len(name))
 	for i, r := range name {

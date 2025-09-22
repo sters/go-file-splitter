@@ -43,6 +43,21 @@ func TestTestNameToSnakeCase(t *testing.T) {
 			input:    "TestComplexCamelCaseExample",
 			expected: "complex_camel_case_example",
 		},
+		{
+			name:     "test with underscore and uppercase",
+			input:    "Test_Uppercase",
+			expected: "uppercase",
+		},
+		{
+			name:     "test with multiple underscores and uppercase",
+			input:    "Test___MultiUnderscore",
+			expected: "multi_underscore",
+		},
+		{
+			name:     "test that starts with uppercase",
+			input:    "TestUppercase",
+			expected: "uppercase",
+		},
 	}
 
 	for _, tt := range tests {

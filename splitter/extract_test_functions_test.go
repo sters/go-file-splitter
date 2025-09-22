@@ -20,6 +20,22 @@ func TestExample2(t *testing.T) {
 	// test code
 }
 
+func Test_Uppercase(t *testing.T) {
+	// should be extracted (starts with uppercase after underscore)
+}
+
+func Test___MultiUnderscore(t *testing.T) {
+	// should be extracted (starts with uppercase after underscores)
+}
+
+func Test_lowercase(t *testing.T) {
+	// should NOT be extracted (starts with lowercase after underscore)
+}
+
+func Test__doubleLowercase(t *testing.T) {
+	// should NOT be extracted (starts with lowercase after underscores)
+}
+
 func helperFunction() {
 	// not a test
 }
@@ -43,20 +59,35 @@ func (m MyType) TestMethodTest(t *testing.T) {
 
 	tests := extractTestFunctions(node)
 
-	if len(tests) != 2 {
-		t.Errorf("Expected 2 test functions, got %d", len(tests))
+	if len(tests) != 4 {
+		t.Errorf("Expected 4 test functions, got %d", len(tests))
+		for _, test := range tests {
+			t.Logf("Found test: %s", test.Name)
+		}
 	}
 
-	expectedNames := []string{"TestExample1", "TestExample2"}
-	for i, test := range tests {
-		if test.Name != expectedNames[i] {
-			t.Errorf("Expected test name %q, got %q", expectedNames[i], test.Name)
+	expectedNames := []string{"TestExample1", "TestExample2", "Test_Uppercase", "Test___MultiUnderscore"}
+	for i, expectedName := range expectedNames {
+		if i >= len(tests) {
+			t.Errorf("Missing expected test: %q", expectedName)
+
+			continue
 		}
-		if test.Package != "example" {
-			t.Errorf("Expected package name 'example', got %q", test.Package)
+		if tests[i].Name != expectedName {
+			t.Errorf("Expected test name %q at index %d, got %q", expectedName, i, tests[i].Name)
 		}
-		if test.FuncDecl == nil {
-			t.Errorf("Expected FuncDecl to be non-nil for %s", test.Name)
+		if tests[i].Package != "example" {
+			t.Errorf("Expected package name 'example', got %q", tests[i].Package)
+		}
+		if tests[i].FuncDecl == nil {
+			t.Errorf("Expected FuncDecl to be non-nil for %s", tests[i].Name)
+		}
+	}
+
+	// Verify that lowercase tests are not included
+	for _, test := range tests {
+		if test.Name == "Test_lowercase" || test.Name == "Test__doubleLowercase" {
+			t.Errorf("Test %q should not have been extracted (starts with lowercase)", test.Name)
 		}
 	}
 }
