@@ -70,7 +70,7 @@ func processTestFile(filename string) error {
 		return fmt.Errorf("failed to parse file: %w", err)
 	}
 
-	tests := extractTestFunctions(node)
+	tests, hasRemainingContent := extractTestFunctions(node)
 	if len(tests) == 0 {
 		return nil
 	}
@@ -96,17 +96,22 @@ func processTestFile(filename string) error {
 		fmt.Printf("Created: %s\n", outputFile)
 	}
 
-	// Delete the original test file after successfully splitting
-	if err := os.Remove(filename); err != nil {
-		return fmt.Errorf("failed to delete original file %s: %w", filename, err)
+	// Only delete the original file if there's no remaining content
+	if !hasRemainingContent {
+		if err := os.Remove(filename); err != nil {
+			return fmt.Errorf("failed to delete original file %s: %w", filename, err)
+		}
+		fmt.Printf("Deleted original: %s\n", filename)
+	} else {
+		fmt.Printf("Preserved original: %s (contains non-split tests or helper functions)\n", filename)
 	}
-	fmt.Printf("Deleted original: %s\n", filename)
 
 	return nil
 }
 
-func extractTestFunctions(node *ast.File) []TestFunction {
+func extractTestFunctions(node *ast.File) ([]TestFunction, bool) {
 	var tests []TestFunction
+	hasRemainingContent := false
 
 	for _, decl := range node.Decls {
 		if fn, ok := decl.(*ast.FuncDecl); ok {
@@ -115,8 +120,9 @@ func extractTestFunctions(node *ast.File) []TestFunction {
 				nameAfterTest := strings.TrimPrefix(fn.Name.Name, "Test")
 				nameAfterTest = strings.TrimLeft(nameAfterTest, "_")
 
-				// Skip if empty or starts with lowercase
+				// Skip if empty or starts with lowercase (e.g., Test_foo)
 				if len(nameAfterTest) == 0 || unicode.IsLower(rune(nameAfterTest[0])) {
+					hasRemainingContent = true
 					continue
 				}
 
@@ -127,11 +133,17 @@ func extractTestFunctions(node *ast.File) []TestFunction {
 					Package:  node.Name.Name,
 				}
 				tests = append(tests, test)
+			} else if fn.Recv == nil {
+				// Non-test functions (helper functions) should be preserved
+				hasRemainingContent = true
 			}
+		} else if _, ok := decl.(*ast.GenDecl); ok {
+			// Type declarations, constants, variables should be preserved
+			hasRemainingContent = true
 		}
 	}
 
-	return tests
+	return tests, hasRemainingContent
 }
 
 func writeTestFile(filename string, test TestFunction, fset *token.FileSet) error {
