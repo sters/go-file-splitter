@@ -185,14 +185,20 @@ func removeExtractedTests(filename string, extractedTests []TestFunction, fset *
 		return nil
 	}
 
-	// Re-add imports if there's remaining content
-	var finalDecls []ast.Decl
-	for _, decl := range node.Decls {
-		if genDecl, ok := decl.(*ast.GenDecl); ok && genDecl.Tok == token.IMPORT {
-			finalDecls = append(finalDecls, decl)
+	// Filter imports to only include used ones
+	usedImports := findUsedImportsInDecls(newDecls, node.Imports)
 
-			break
+	// Re-add only used imports if there's remaining content
+	var finalDecls []ast.Decl
+	if len(usedImports) > 0 {
+		importDecl := &ast.GenDecl{
+			Tok:   token.IMPORT,
+			Specs: make([]ast.Spec, len(usedImports)),
 		}
+		for i, imp := range usedImports {
+			importDecl.Specs[i] = imp
+		}
+		finalDecls = append(finalDecls, importDecl)
 	}
 	finalDecls = append(finalDecls, newDecls...)
 	node.Decls = finalDecls
@@ -234,8 +240,13 @@ func shouldKeepComment(cg *ast.CommentGroup, node *ast.File, extractedNames map[
 			return false
 		}
 
-		// Also check if comment is just before the function (orphaned comment)
-		if cg.End()+1 <= fn.Pos() && !hasIntermediateDecl(cg, fn, node.Decls) {
+		// Check if comment belongs to the extracted function (including before and after comments)
+		if isTestSpecificComment(cg, fn, node.Decls) {
+			return false
+		}
+
+		// Also remove comments inside the extracted function body
+		if fn.Body != nil && cg.Pos() >= fn.Body.Lbrace && cg.End() <= fn.Body.Rbrace {
 			return false
 		}
 	}
@@ -243,14 +254,77 @@ func shouldKeepComment(cg *ast.CommentGroup, node *ast.File, extractedNames map[
 	return true
 }
 
-func hasIntermediateDecl(cg *ast.CommentGroup, fn *ast.FuncDecl, decls []ast.Decl) bool {
-	for _, d := range decls {
-		if d.Pos() > cg.End() && d.Pos() < fn.Pos() {
-			return true
+// This only returns true for standalone comments that should be included with the test.
+func isTestSpecificComment(cg *ast.CommentGroup, fn *ast.FuncDecl, allDecls []ast.Decl) bool {
+	// Skip if comment is inside the function body itself - these are handled automatically
+	if fn.Body != nil && cg.Pos() >= fn.Body.Lbrace && cg.End() <= fn.Body.Rbrace {
+		// Comments inside the function body are handled automatically by format.Node
+		return false
+	}
+
+	// Skip if this comment is inside another function body
+	for _, otherDecl := range allDecls {
+		if otherFn, ok := otherDecl.(*ast.FuncDecl); ok && otherFn != fn {
+			if otherFn.Body != nil && cg.Pos() >= otherFn.Body.Lbrace && cg.End() <= otherFn.Body.Rbrace {
+				return false
+			}
 		}
 	}
 
-	return false
+	// Find the function's position in the declarations
+	fnIndex := -1
+	for i, decl := range allDecls {
+		if decl == fn {
+			fnIndex = i
+
+			break
+		}
+	}
+
+	if fnIndex == -1 {
+		return false
+	}
+
+	// Check comments before the function
+	if cg.End() >= fn.Pos() {
+		// Comments after functions stay in the original file
+		if fn.Body != nil && cg.Pos() > fn.Body.Rbrace {
+			return false
+		}
+
+		return false
+	}
+
+	// Find the previous declaration
+	var prevDecl ast.Decl
+	prevDeclEnd := token.Pos(0)
+	for i := fnIndex - 1; i >= 0; i-- {
+		if decl := allDecls[i]; decl != nil {
+			prevDecl = decl
+			if funcDecl, ok := decl.(*ast.FuncDecl); ok && funcDecl.Body != nil {
+				prevDeclEnd = funcDecl.Body.Rbrace
+			} else {
+				prevDeclEnd = decl.End()
+			}
+
+			break
+		}
+	}
+
+	// If there's a previous declaration, check which function the comment is closer to
+	if prevDecl != nil {
+		distToPrevDecl := cg.Pos() - prevDeclEnd
+		distToCurrentFunc := fn.Pos() - cg.End()
+
+		// If comment is closer to previous declaration, it belongs to that
+		if distToPrevDecl < distToCurrentFunc {
+			return false
+		}
+	}
+
+	// Comment belongs to this function if it's after the previous declaration
+	// and reasonably close to the function (within 50 lines)
+	return cg.Pos() > prevDeclEnd && fn.Pos()-cg.End() < token.Pos(50*80)
 }
 
 func extractTestFunctions(node *ast.File) ([]TestFunction, bool) {
@@ -304,40 +378,10 @@ func extractTestFunctions(node *ast.File) ([]TestFunction, bool) {
 				continue
 			}
 
-			// Skip if this comment is inside another function body
-			isInsideOtherFunc := false
-			for _, otherDecl := range node.Decls {
-				if otherFn, ok := otherDecl.(*ast.FuncDecl); ok && otherFn != fn {
-					// Check if comment is inside the other function's body
-					if otherFn.Body != nil && cg.Pos() >= otherFn.Body.Lbrace && cg.End() <= otherFn.Body.Rbrace {
-						isInsideOtherFunc = true
-
-						break
-					}
-				}
-			}
-			if isInsideOtherFunc {
-				continue
-			}
-
-			// Check if this comment is before the function and after the previous declaration
-			if cg.End() < fn.Pos() {
-				// Find if there's another declaration between the comment and this function
-				belongsToThisFunc := true
-				for _, otherDecl := range node.Decls {
-					if otherDecl.Pos() > cg.End() && otherDecl.Pos() < fn.Pos() {
-						belongsToThisFunc = false
-
-						break
-					}
-				}
-
-				if belongsToThisFunc {
-					// Check if comment is reasonably close to the function (within 50 lines)
-					if fn.Pos()-cg.End() < token.Pos(50*80) { // Approximate check
-						standaloneComments = append(standaloneComments, cg)
-					}
-				}
+			// Only include comments that are specifically for this test function
+			// and not for other functions or general file comments
+			if isTestSpecificComment(cg, fn, node.Decls) {
+				standaloneComments = append(standaloneComments, cg)
 			}
 		}
 
@@ -468,6 +512,139 @@ func findUsedImports(fn *ast.FuncDecl, allImports []*ast.ImportSpec) []*ast.Impo
 	return result
 }
 
+func findUsedImportsInDecls(decls []ast.Decl, allImports []*ast.ImportSpec) []*ast.ImportSpec {
+	usedPackages := make(map[string]bool)
+
+	// Always include "testing" package if there are test-related functions
+	for _, decl := range decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			if strings.HasPrefix(fn.Name.Name, "Test") || strings.HasPrefix(fn.Name.Name, "Benchmark") || strings.HasPrefix(fn.Name.Name, "Example") {
+				usedPackages["testing"] = true
+
+				break
+			}
+		}
+	}
+
+	// Walk through all declarations to find used packages
+	for _, decl := range decls {
+		ast.Inspect(decl, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.SelectorExpr:
+				// e.g., fmt.Println, strings.HasPrefix
+				if ident, ok := x.X.(*ast.Ident); ok {
+					usedPackages[ident.Name] = true
+				}
+			case *ast.CallExpr:
+				// Check for type assertions and conversions that might use imported types
+				if ident, ok := x.Fun.(*ast.Ident); ok {
+					usedPackages[ident.Name] = true
+				}
+			case *ast.Ident:
+				// Check for types from imported packages
+				// This is a simplified check - might need refinement for complex cases
+				if x.Obj == nil && x.Name != "" {
+					// Could be a package-level identifier
+					usedPackages[x.Name] = true
+				}
+			}
+
+			return true
+		})
+	}
+
+	// Filter imports to only include used ones
+	var result []*ast.ImportSpec
+	for _, imp := range allImports {
+		importPath := strings.Trim(imp.Path.Value, `"`)
+
+		// Get the package name (last part of import path or alias)
+		var pkgName string
+		if imp.Name != nil {
+			pkgName = imp.Name.Name
+		} else {
+			parts := strings.Split(importPath, "/")
+			pkgName = parts[len(parts)-1]
+		}
+
+		// Check if this import should be included
+		switch {
+		case importPath == "testing" && usedPackages["testing"]:
+			result = append(result, imp)
+		case usedPackages[pkgName]:
+			result = append(result, imp)
+		case strings.Contains(importPath, "testify/assert") && usedPackages["assert"]:
+			result = append(result, imp)
+		case strings.Contains(importPath, "testify/require") && usedPackages["require"]:
+			result = append(result, imp)
+		case strings.Contains(importPath, "testify/suite") && usedPackages["suite"]:
+			result = append(result, imp)
+		}
+	}
+
+	return result
+}
+
+// getCommonAbbreviations returns common abbreviations and Go keywords that should not be split.
+func getCommonAbbreviations() []string {
+	return []string{
+		"ID", "UUID", "URL", "URI", "API", "HTTP", "HTTPS", "JSON", "XML", "CSV",
+		"SQL", "DB", "TCP", "UDP", "IP", "DNS", "SSH", "TLS", "SSL", "JWT",
+		"AWS", "GCP", "CPU", "GPU", "RAM", "ROM", "IO", "EOF", "TTL", "CDN",
+		"HTML", "CSS", "JS", "MD5", "SHA", "RSA", "AES", "UTF", "ASCII",
+		"CRUD", "REST", "RPC", "GRPC", "MQTT", "AMQP", "SMTP", "IMAP", "POP",
+		"SDK", "CLI", "GUI", "UI", "UX", "OS", "VM", "PDF", "PNG", "JPG", "GIF",
+	}
+}
+
+// matchesAbbreviation checks if the substring at position i matches any known abbreviation.
+func matchesAbbreviation(runes []rune, i int) (string, int) {
+	commonAbbreviations := getCommonAbbreviations()
+	for _, abbr := range commonAbbreviations {
+		if i+len(abbr) > len(runes) {
+			continue
+		}
+
+		substr := string(runes[i : i+len(abbr)])
+		if strings.ToUpper(substr) != abbr {
+			continue
+		}
+
+		// Check if it's a word boundary (next char is uppercase or end of string)
+		atWordBoundary := i+len(abbr) == len(runes) ||
+			(i+len(abbr) < len(runes) && unicode.IsUpper(runes[i+len(abbr)]))
+
+		if atWordBoundary {
+			return abbr, len(abbr)
+		}
+	}
+
+	return "", 0
+}
+
+// shouldAddUnderscore checks if an underscore should be added before the current character.
+func shouldAddUnderscore(runes []rune, i int, result []rune) bool {
+	if i == 0 || !unicode.IsUpper(runes[i]) {
+		return false
+	}
+
+	if len(result) == 0 || result[len(result)-1] == '_' {
+		return false
+	}
+
+	// Uppercase followed by lowercase (e.g., "Name" in "UserName")
+	if i+1 < len(runes) && unicode.IsLower(runes[i+1]) {
+		return true
+	}
+
+	// Lowercase followed by uppercase (e.g., "N" in "userName")
+	if i > 0 && unicode.IsLower(runes[i-1]) {
+		return true
+	}
+
+	return false
+}
+
 func testNameToSnakeCase(name string) string {
 	if !strings.HasPrefix(name, "Test") {
 		return strings.ToLower(name)
@@ -482,14 +659,38 @@ func testNameToSnakeCase(name string) string {
 		return "test"
 	}
 
-	result := make([]rune, 0, len(name))
-	for i, r := range name {
-		if i > 0 && unicode.IsUpper(r) {
-			if i+1 < len(name) && unicode.IsLower(rune(name[i+1])) {
-				result = append(result, '_')
-			} else if i > 0 && unicode.IsLower(rune(name[i-1])) {
+	// Check if the entire name (after Test prefix) is a common abbreviation
+	commonAbbreviations := getCommonAbbreviations()
+	for _, abbr := range commonAbbreviations {
+		if strings.ToUpper(name) == abbr {
+			return strings.ToLower(name)
+		}
+	}
+
+	// Process the name character by character, handling abbreviations
+	result := make([]rune, 0, len(name)*2)
+	runes := []rune(name)
+
+	for i := 0; i < len(runes); i++ {
+		// Check if current position starts with a known abbreviation
+		if abbr, length := matchesAbbreviation(runes, i); abbr != "" {
+			// Add underscore before abbreviation if needed
+			if i > 0 && len(result) > 0 && result[len(result)-1] != '_' {
 				result = append(result, '_')
 			}
+			// Add the abbreviation in lowercase
+			for _, r := range strings.ToLower(abbr) {
+				result = append(result, r)
+			}
+			i += length - 1 // -1 because the loop will increment
+
+			continue
+		}
+
+		// Handle regular character
+		r := runes[i]
+		if shouldAddUnderscore(runes, i, result) {
+			result = append(result, '_')
 		}
 		result = append(result, unicode.ToLower(r))
 	}
