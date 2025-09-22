@@ -22,11 +22,15 @@ func extractPublicFunctions(node *ast.File) []PublicFunction {
 		}
 
 		var standaloneComments []*ast.CommentGroup
+		var inlineComments []*ast.CommentGroup
 		for _, cg := range node.Comments {
 			if cg == fn.Doc {
 				continue
 			}
-			if isFunctionSpecificComment(cg, fn, node.Decls) {
+			// Check if comment is inside the function body
+			if fn.Body != nil && cg.Pos() >= fn.Body.Lbrace && cg.End() <= fn.Body.Rbrace {
+				inlineComments = append(inlineComments, cg)
+			} else if isFunctionSpecificComment(cg, fn, node.Decls) {
 				standaloneComments = append(standaloneComments, cg)
 			}
 		}
@@ -36,6 +40,7 @@ func extractPublicFunctions(node *ast.File) []PublicFunction {
 			FuncDecl:           fn,
 			Comments:           fn.Doc,
 			StandaloneComments: standaloneComments,
+			InlineComments:     inlineComments,
 			Imports:            node.Imports,
 			Package:            node.Name.Name,
 		}
@@ -109,11 +114,15 @@ func extractTestFunctions(node *ast.File) []TestFunction {
 		}
 
 		var standaloneComments []*ast.CommentGroup
+		var inlineComments []*ast.CommentGroup
 		for _, cg := range node.Comments {
 			if cg == fn.Doc {
 				continue
 			}
-			if isFunctionSpecificComment(cg, fn, node.Decls) {
+			// Check if comment is inside the function body
+			if fn.Body != nil && cg.Pos() >= fn.Body.Lbrace && cg.End() <= fn.Body.Rbrace {
+				inlineComments = append(inlineComments, cg)
+			} else if isFunctionSpecificComment(cg, fn, node.Decls) {
 				standaloneComments = append(standaloneComments, cg)
 			}
 		}
@@ -123,6 +132,7 @@ func extractTestFunctions(node *ast.File) []TestFunction {
 			FuncDecl:           fn,
 			Comments:           fn.Doc,
 			StandaloneComments: standaloneComments,
+			InlineComments:     inlineComments,
 			Imports:            node.Imports,
 			Package:            node.Name.Name,
 		}

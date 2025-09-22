@@ -240,6 +240,60 @@ func updateOriginalFile(filename string, extractedFuncs []PublicFunction, extrac
 
 	node.Decls = finalDecls
 
+	// Filter comments to remove those belonging to extracted functions
+	// We need to collect comment text that should be removed
+	removedCommentTexts := make(map[string]bool)
+
+	// Collect comment texts from extracted functions
+	for _, fn := range extractedFuncs {
+		// Use the original FuncDecl from the extracted function
+		if fn.FuncDecl != nil {
+			// Remove doc comments
+			if fn.FuncDecl.Doc != nil {
+				for _, c := range fn.FuncDecl.Doc.List {
+					removedCommentTexts[c.Text] = true
+				}
+			}
+			// Remove inline comments collected during extraction
+			for _, cg := range fn.InlineComments {
+				for _, c := range cg.List {
+					removedCommentTexts[c.Text] = true
+				}
+			}
+			// Remove standalone comments
+			for _, cg := range fn.StandaloneComments {
+				for _, c := range cg.List {
+					removedCommentTexts[c.Text] = true
+				}
+			}
+		}
+	}
+
+	// Collect comment texts from extracted declarations
+	for _, decl := range extractedDecls {
+		if decl.Comments != nil {
+			for _, c := range decl.Comments.List {
+				removedCommentTexts[c.Text] = true
+			}
+		}
+	}
+
+	// Keep only comment groups that don't contain removed comment texts
+	var remainingComments []*ast.CommentGroup
+	for _, cg := range node.Comments {
+		shouldKeep := true
+		for _, c := range cg.List {
+			if removedCommentTexts[c.Text] {
+				shouldKeep = false
+				break
+			}
+		}
+		if shouldKeep {
+			remainingComments = append(remainingComments, cg)
+		}
+	}
+	node.Comments = remainingComments
+
 	// Format and write back
 	if err := formatAndWriteFile(filename, node, fset); err != nil {
 		return err
@@ -315,6 +369,50 @@ func removeExtractedTests(filename string, extractedTests []TestFunction, fset *
 
 	node.Decls = finalDecls
 
+	// Filter comments to remove those belonging to extracted tests
+	removedCommentTexts := make(map[string]bool)
+
+	// Collect comment texts from extracted tests
+	for _, test := range extractedTests {
+		// Use the original FuncDecl from the extracted test
+		if test.FuncDecl != nil {
+			// Remove doc comments
+			if test.FuncDecl.Doc != nil {
+				for _, c := range test.FuncDecl.Doc.List {
+					removedCommentTexts[c.Text] = true
+				}
+			}
+			// Remove inline comments collected during extraction
+			for _, cg := range test.InlineComments {
+				for _, c := range cg.List {
+					removedCommentTexts[c.Text] = true
+				}
+			}
+			// Remove standalone comments
+			for _, cg := range test.StandaloneComments {
+				for _, c := range cg.List {
+					removedCommentTexts[c.Text] = true
+				}
+			}
+		}
+	}
+
+	// Keep only comment groups that don't contain removed comment texts
+	var remainingComments []*ast.CommentGroup
+	for _, cg := range node.Comments {
+		shouldKeep := true
+		for _, c := range cg.List {
+			if removedCommentTexts[c.Text] {
+				shouldKeep = false
+				break
+			}
+		}
+		if shouldKeep {
+			remainingComments = append(remainingComments, cg)
+		}
+	}
+	node.Comments = remainingComments
+
 	// Format and write back
 	if err := formatAndWriteFile(filename, node, fset); err != nil {
 		return err
@@ -344,11 +442,15 @@ func splitTestForFunction(testFile string, functionName string, outputDir string
 		// Check if test name contains the function name
 		if strings.Contains(fn.Name.Name, functionName) {
 			var standaloneComments []*ast.CommentGroup
+			var inlineComments []*ast.CommentGroup
 			for _, cg := range node.Comments {
 				if cg == fn.Doc {
 					continue
 				}
-				if isFunctionSpecificComment(cg, fn, node.Decls) {
+				// Check if comment is inside the function body
+				if fn.Body != nil && cg.Pos() >= fn.Body.Lbrace && cg.End() <= fn.Body.Rbrace {
+					inlineComments = append(inlineComments, cg)
+				} else if isFunctionSpecificComment(cg, fn, node.Decls) {
 					standaloneComments = append(standaloneComments, cg)
 				}
 			}
@@ -358,6 +460,7 @@ func splitTestForFunction(testFile string, functionName string, outputDir string
 				FuncDecl:           fn,
 				Comments:           fn.Doc,
 				StandaloneComments: standaloneComments,
+				InlineComments:     inlineComments,
 				Imports:            node.Imports,
 				Package:            node.Name.Name,
 			}

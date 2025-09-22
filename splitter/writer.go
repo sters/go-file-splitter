@@ -33,11 +33,19 @@ func writePublicFunction(filename string, fn PublicFunction, fset *token.FileSet
 	}
 	decls = append(decls, fn.FuncDecl)
 
+	// Combine all comments: doc, standalone, and inline
+	var allComments []*ast.CommentGroup
+	if fn.Comments != nil {
+		allComments = append(allComments, fn.Comments)
+	}
+	allComments = append(allComments, fn.StandaloneComments...)
+	allComments = append(allComments, fn.InlineComments...)
+
 	// Create an AST file
 	astFile := &ast.File{
 		Name:     &ast.Ident{Name: fn.Package},
 		Decls:    decls,
-		Comments: fn.StandaloneComments,
+		Comments: allComments,
 	}
 
 	// Format and write to file
@@ -72,11 +80,19 @@ func writeTestFunction(filename string, test TestFunction, fset *token.FileSet) 
 	}
 	decls = append(decls, test.FuncDecl)
 
+	// Combine all comments: doc, standalone, and inline
+	var allComments []*ast.CommentGroup
+	if test.Comments != nil {
+		allComments = append(allComments, test.Comments)
+	}
+	allComments = append(allComments, test.StandaloneComments...)
+	allComments = append(allComments, test.InlineComments...)
+
 	// Create an AST file
 	astFile := &ast.File{
 		Name:     &ast.Ident{Name: test.Package},
 		Decls:    decls,
-		Comments: test.StandaloneComments,
+		Comments: allComments,
 	}
 
 	// Format and write to file

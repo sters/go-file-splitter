@@ -12,6 +12,7 @@ type PublicFunction struct {
 	FuncDecl           *ast.FuncDecl
 	Comments           *ast.CommentGroup
 	StandaloneComments []*ast.CommentGroup
+	InlineComments     []*ast.CommentGroup // Comments inside the function body
 	Imports            []*ast.ImportSpec
 	Package            string
 }
@@ -28,6 +29,7 @@ type TestFunction struct {
 	FuncDecl           *ast.FuncDecl
 	Comments           *ast.CommentGroup
 	StandaloneComments []*ast.CommentGroup
+	InlineComments     []*ast.CommentGroup // Comments inside the function body
 	Imports            []*ast.ImportSpec
 	Package            string
 }
