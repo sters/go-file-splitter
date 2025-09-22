@@ -161,6 +161,7 @@ func removeExtractedTests(filename string, extractedTests []TestFunction, fset *
 			return fmt.Errorf("failed to delete empty file: %w", err)
 		}
 		fmt.Printf("Deleted original (now empty): %s\n", filename)
+
 		return nil
 	}
 
@@ -169,6 +170,7 @@ func removeExtractedTests(filename string, extractedTests []TestFunction, fset *
 	for _, decl := range node.Decls {
 		if genDecl, ok := decl.(*ast.GenDecl); ok && genDecl.Tok == token.IMPORT {
 			finalDecls = append(finalDecls, decl)
+
 			break
 		}
 	}
@@ -189,37 +191,47 @@ func removeExtractedTests(filename string, extractedTests []TestFunction, fset *
 }
 
 func extractTestFunctions(node *ast.File) ([]TestFunction, bool) {
-	var tests []TestFunction
+	tests := make([]TestFunction, 0, len(node.Decls))
 	hasRemainingContent := false
 
 	for _, decl := range node.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok {
-			if strings.HasPrefix(fn.Name.Name, "Test") && fn.Recv == nil {
-				// Check if the character after "Test" (and any underscores) is uppercase
-				nameAfterTest := strings.TrimPrefix(fn.Name.Name, "Test")
-				nameAfterTest = strings.TrimLeft(nameAfterTest, "_")
+		fn, isFuncDecl := decl.(*ast.FuncDecl)
+		if !isFuncDecl {
+			if _, ok := decl.(*ast.GenDecl); ok {
+				// Type declarations, constants, variables should be preserved
+				hasRemainingContent = true
+			}
 
-				// Skip if empty or starts with lowercase (e.g., Test_foo)
-				if len(nameAfterTest) == 0 || unicode.IsLower(rune(nameAfterTest[0])) {
-					hasRemainingContent = true
-					continue
-				}
+			continue
+		}
 
-				test := TestFunction{
-					Name:     fn.Name.Name,
-					FuncDecl: fn,
-					Imports:  node.Imports,
-					Package:  node.Name.Name,
-				}
-				tests = append(tests, test)
-			} else if fn.Recv == nil {
+		if !strings.HasPrefix(fn.Name.Name, "Test") || fn.Recv != nil {
+			if fn.Recv == nil {
 				// Non-test functions (helper functions) should be preserved
 				hasRemainingContent = true
 			}
-		} else if _, ok := decl.(*ast.GenDecl); ok {
-			// Type declarations, constants, variables should be preserved
-			hasRemainingContent = true
+
+			continue
 		}
+
+		// Check if the character after "Test" (and any underscores) is uppercase
+		nameAfterTest := strings.TrimPrefix(fn.Name.Name, "Test")
+		nameAfterTest = strings.TrimLeft(nameAfterTest, "_")
+
+		// Skip if empty or starts with lowercase (e.g., Test_foo)
+		if len(nameAfterTest) == 0 || unicode.IsLower(rune(nameAfterTest[0])) {
+			hasRemainingContent = true
+
+			continue
+		}
+
+		test := TestFunction{
+			Name:     fn.Name.Name,
+			FuncDecl: fn,
+			Imports:  node.Imports,
+			Package:  node.Name.Name,
+		}
+		tests = append(tests, test)
 	}
 
 	return tests, hasRemainingContent

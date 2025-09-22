@@ -35,9 +35,7 @@ func TestSecond(t *testing.T) {
 
 	// The original file is now preserved even if it only contains extracted tests
 	// because the new logic removes extracted tests from the original file
-	if _, err := os.Stat(testFile); os.IsNotExist(err) {
-		// This is OK - file can be deleted if no remaining content
-	} else {
+	if _, err := os.Stat(testFile); !os.IsNotExist(err) {
 		// File exists - verify it doesn't contain the extracted tests
 		content, err := os.ReadFile(testFile)
 		if err != nil {

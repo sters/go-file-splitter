@@ -124,12 +124,14 @@ func ExampleFunction() {
 		_, err := os.Stat(expectedFile)
 		if os.IsNotExist(err) {
 			t.Errorf("Expected file %s was not created", expectedFile)
+
 			continue
 		}
 
 		content, err := os.ReadFile(expectedFile)
 		if err != nil {
 			t.Errorf("Failed to read %s: %v", expectedFile, err)
+
 			continue
 		}
 
