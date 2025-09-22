@@ -35,6 +35,7 @@ func TestExample(t *testing.T) {
 	for _, decl := range node.Decls {
 		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "TestExample" {
 			testFunc = fn
+
 			break
 		}
 	}
@@ -56,6 +57,68 @@ func TestExample(t *testing.T) {
 		path := strings.Trim(imp.Path.Value, `"`)
 		if path == "os" {
 			t.Error("Unused import 'os' should not be included")
+		}
+	}
+}
+
+func TestFindUsedPackages(t *testing.T) {
+	src := `package test
+
+import (
+	"fmt"
+	"strings"
+	"os"
+)
+
+func Example() {
+	fmt.Println("test")
+	strings.ToUpper("test")
+	var _ os.File
+}
+`
+
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, "test.go", src, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+
+	// Find the function
+	var fn *ast.FuncDecl
+	for _, decl := range node.Decls {
+		if f, ok := decl.(*ast.FuncDecl); ok && f.Name.Name == "Example" {
+			fn = f
+
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("Function not found")
+	}
+
+	usedPkgs := findUsedPackages(fn)
+
+	expectedPkgs := map[string]bool{
+		"fmt":     true,
+		"strings": true,
+		"os":      true,
+	}
+
+	if len(usedPkgs) != len(expectedPkgs) {
+		t.Errorf("Expected %d used packages, got %d", len(expectedPkgs), len(usedPkgs))
+	}
+
+	// usedPkgs is a map[string]bool, so iterate over keys
+	for pkgName := range usedPkgs {
+		if !expectedPkgs[pkgName] {
+			t.Errorf("Unexpected package: %s", pkgName)
+		}
+	}
+
+	for pkgName := range expectedPkgs {
+		if !usedPkgs[pkgName] {
+			t.Errorf("Missing expected package: %s", pkgName)
 		}
 	}
 }
@@ -89,6 +152,7 @@ func SecondFunc() {
 	for _, decl := range node.Decls {
 		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "SecondFunc" {
 			secondFunc = fn
+
 			break
 		}
 	}

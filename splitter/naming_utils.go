@@ -144,6 +144,7 @@ func methodNameToSnakeCase(receiverType, methodName string) string {
 	// Convert both receiver type and method name to snake case and combine
 	receiverSnake := functionNameToSnakeCase(receiverType)
 	methodSnake := functionNameToSnakeCase(methodName)
+
 	return receiverSnake + "_" + methodSnake
 }
 

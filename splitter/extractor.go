@@ -8,7 +8,7 @@ import (
 )
 
 func extractPublicFunctions(node *ast.File) []PublicFunction {
-	var publicFuncs []PublicFunction
+	publicFuncs := make([]PublicFunction, 0, len(node.Decls))
 
 	for _, decl := range node.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -97,7 +97,7 @@ func extractPublicDeclarations(node *ast.File) []PublicDeclaration {
 }
 
 func extractTestFunctions(node *ast.File) []TestFunction {
-	var tests []TestFunction
+	tests := make([]TestFunction, 0, len(node.Decls))
 
 	for _, decl := range node.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -148,7 +148,7 @@ func extractTestFunctions(node *ast.File) []TestFunction {
 }
 
 func extractPublicMethods(node *ast.File) []PublicMethod {
-	var publicMethods []PublicMethod
+	publicMethods := make([]PublicMethod, 0, len(node.Decls))
 
 	for _, decl := range node.Decls {
 		fn, ok := decl.(*ast.FuncDecl)

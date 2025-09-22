@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/sters/go-test-file-splitter/go-public-func-splitter/splitter"
+	"github.com/sters/go-file-splitter/splitter"
 )
 
 var (

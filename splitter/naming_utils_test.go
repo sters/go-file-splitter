@@ -77,18 +77,42 @@ func TestMatchesAbbreviation(t *testing.T) {
 	}
 }
 
+func TestMethodNameToSnakeCase(t *testing.T) {
+	tests := []struct {
+		receiverType string
+		methodName   string
+		expected     string
+	}{
+		{"User", "GetName", "user_get_name"},
+		{"HTTPClient", "SendRequest", "http_client_send_request"},
+		{"DB", "Connect", "db_connect"},
+		{"XMLParser", "Parse", "xml_parser_parse"},
+		{"MyStruct", "DoSomething", "my_struct_do_something"},
+		{"", "OrphanMethod", "func_orphan_method"}, // empty receiver becomes "func"
+		{"Service", "", "service_func"},            // empty method becomes "func"
+	}
+
+	for _, tc := range tests {
+		result := methodNameToSnakeCase(tc.receiverType, tc.methodName)
+		if result != tc.expected {
+			t.Errorf("methodNameToSnakeCase(%q, %q) = %q, want %q",
+				tc.receiverType, tc.methodName, result, tc.expected)
+		}
+	}
+}
+
 func TestShouldAddUnderscore(t *testing.T) {
 	tests := []struct {
 		input    string
 		pos      int
 		expected bool
 	}{
-		{"PublicFunc", 6, true},  // Before 'F' in Func
-		{"HTTPServer", 4, true},  // Before 'S' in Server
-		{"getURL", 3, true},      // Before 'U' in URL
-		{"ABC", 1, false},        // All caps
-		{"abc", 1, false},        // All lowercase
-		{"Public", 0, false},     // First character
+		{"PublicFunc", 6, true}, // Before 'F' in Func
+		{"HTTPServer", 4, true}, // Before 'S' in Server
+		{"getURL", 3, true},     // Before 'U' in URL
+		{"ABC", 1, false},       // All caps
+		{"abc", 1, false},       // All lowercase
+		{"Public", 0, false},    // First character
 	}
 
 	for _, tc := range tests {

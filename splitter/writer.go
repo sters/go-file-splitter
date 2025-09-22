@@ -11,10 +11,19 @@ import (
 )
 
 func writePublicFunction(filename string, fn PublicFunction, fset *token.FileSet) error {
+	return writeFunctionGeneric(filename, fn.FuncDecl, fn.Comments, fn.StandaloneComments, fn.InlineComments, fn.Imports, fn.Package, fset)
+}
+
+func writeTestFunction(filename string, test TestFunction, fset *token.FileSet) error {
+	return writeFunctionGeneric(filename, test.FuncDecl, test.Comments, test.StandaloneComments, test.InlineComments, test.Imports, test.Package, fset)
+}
+
+// writeFunctionGeneric is a generic function to write a function (either public or test) to a file.
+func writeFunctionGeneric(filename string, funcDecl *ast.FuncDecl, comments *ast.CommentGroup, standaloneComments, inlineComments []*ast.CommentGroup, imports []*ast.ImportSpec, packageName string, fset *token.FileSet) error {
 	var decls []ast.Decl
 
 	// Find which imports are actually used
-	usedImports := findUsedImports(fn.FuncDecl, fn.Imports)
+	usedImports := findUsedImports(funcDecl, imports)
 
 	// Add import declarations if there are any used imports
 	if len(usedImports) > 0 {
@@ -29,90 +38,38 @@ func writePublicFunction(filename string, fn PublicFunction, fset *token.FileSet
 	}
 
 	// Add the function with its comments
-	if fn.Comments != nil {
-		fn.FuncDecl.Doc = fn.Comments
+	if comments != nil {
+		funcDecl.Doc = comments
 	}
-	decls = append(decls, fn.FuncDecl)
+	decls = append(decls, funcDecl)
 
 	// Combine all comments: doc, standalone, and inline
 	var allComments []*ast.CommentGroup
-	if fn.Comments != nil {
-		allComments = append(allComments, fn.Comments)
+	if comments != nil {
+		allComments = append(allComments, comments)
 	}
-	allComments = append(allComments, fn.StandaloneComments...)
-	allComments = append(allComments, fn.InlineComments...)
+	allComments = append(allComments, standaloneComments...)
+	allComments = append(allComments, inlineComments...)
 
 	// Create an AST file
 	astFile := &ast.File{
-		Name:     &ast.Ident{Name: fn.Package},
+		Name:     &ast.Ident{Name: packageName},
 		Decls:    decls,
 		Comments: allComments,
 	}
 
 	// Format and write to file
-	if err := formatAndWriteFile(filename, astFile, fset); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func writeTestFunction(filename string, test TestFunction, fset *token.FileSet) error {
-	var decls []ast.Decl
-
-	// Find which imports are actually used
-	usedImports := findUsedImports(test.FuncDecl, test.Imports)
-
-	// Add import declarations if there are any used imports
-	if len(usedImports) > 0 {
-		importDecl := &ast.GenDecl{
-			Tok:   token.IMPORT,
-			Specs: make([]ast.Spec, len(usedImports)),
-		}
-		for i, imp := range usedImports {
-			importDecl.Specs[i] = imp
-		}
-		decls = append(decls, importDecl)
-	}
-
-	// Add the test function with its comments
-	if test.Comments != nil {
-		test.FuncDecl.Doc = test.Comments
-	}
-	decls = append(decls, test.FuncDecl)
-
-	// Combine all comments: doc, standalone, and inline
-	var allComments []*ast.CommentGroup
-	if test.Comments != nil {
-		allComments = append(allComments, test.Comments)
-	}
-	allComments = append(allComments, test.StandaloneComments...)
-	allComments = append(allComments, test.InlineComments...)
-
-	// Create an AST file
-	astFile := &ast.File{
-		Name:     &ast.Ident{Name: test.Package},
-		Decls:    decls,
-		Comments: allComments,
-	}
-
-	// Format and write to file
-	if err := formatAndWriteFile(filename, astFile, fset); err != nil {
-		return err
-	}
-
-	return nil
+	return formatAndWriteFile(filename, astFile, fset)
 }
 
 func writeCommonFile(filename string, decls []PublicDeclaration, pkgName string, imports []*ast.ImportSpec, fset *token.FileSet) error {
-	var astDecls []ast.Decl
+	astDecls := make([]ast.Decl, 0, len(decls)+1)
 
 	// Collect all used imports from declarations
 	usedPackages := make(map[string]bool)
 	for _, decl := range decls {
 		ast.Inspect(decl.GenDecl, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.SelectorExpr:
+			if x, ok := n.(*ast.SelectorExpr); ok {
 				if ident, ok := x.X.(*ast.Ident); ok {
 					usedPackages[ident.Name] = true
 				}
@@ -174,7 +131,7 @@ func writeTestsToFile(filename string, tests []TestFunction, fset *token.FileSet
 		return nil
 	}
 
-	var decls []ast.Decl
+	decls := make([]ast.Decl, 0, len(tests)+1)
 
 	// Collect all imports needed
 	allImports := tests[0].Imports
@@ -183,8 +140,7 @@ func writeTestsToFile(filename string, tests []TestFunction, fset *token.FileSet
 
 	for _, test := range tests {
 		ast.Inspect(test.FuncDecl, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.SelectorExpr:
+			if x, ok := n.(*ast.SelectorExpr); ok {
 				if ident, ok := x.X.(*ast.Ident); ok {
 					usedPackages[ident.Name] = true
 				}
@@ -402,7 +358,7 @@ func writeMethodsWithStructs(outputDir string, publicDecls []PublicDeclaration, 
 
 func writeTypeWithMethods(filename string, typeDecl *ast.GenDecl, methods []PublicMethod, packageName string, imports []*ast.ImportSpec, fset *token.FileSet) error {
 	// Build the declarations
-	var decls []ast.Decl
+	decls := make([]ast.Decl, 0, len(methods)+2)
 
 	// Find all used packages
 	usedPackages := make(map[string]bool)
@@ -414,6 +370,7 @@ func writeTypeWithMethods(filename string, typeDecl *ast.GenDecl, methods []Publ
 				usedPackages[ident.Name] = true
 			}
 		}
+
 		return true
 	})
 

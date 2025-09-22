@@ -9,11 +9,7 @@ import (
 
 func TestSplitPublicFunctions_Integration(t *testing.T) {
 	// Create a temporary directory for testing
-	tmpDir, err := os.MkdirTemp("", "splitter_test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	// Create a test Go file
 	testFile := filepath.Join(tmpDir, "example.go")
@@ -34,7 +30,7 @@ func privateFunc() string {
 }
 `
 
-	if err := os.WriteFile(testFile, []byte(testContent), 0644); err != nil {
+	if err := os.WriteFile(testFile, []byte(testContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -57,12 +53,12 @@ func TestPrivateFunc(t *testing.T) {
 }
 `
 
-	if err := os.WriteFile(testTestFile, []byte(testTestContent), 0644); err != nil {
+	if err := os.WriteFile(testTestFile, []byte(testTestContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	// Run SplitPublicFunctions
-	if err := SplitPublicFunctions(tmpDir); err != nil {
+	if err := SplitPublicFunctions(tmpDir, MethodStrategySeparate); err != nil {
 		t.Fatalf("SplitPublicFunctions failed: %v", err)
 	}
 
@@ -97,11 +93,7 @@ func TestPrivateFunc(t *testing.T) {
 
 func TestSplitTestFunctions_Integration(t *testing.T) {
 	// Create a temporary directory for testing
-	tmpDir, err := os.MkdirTemp("", "splitter_test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	// Create a test file
 	testFile := filepath.Join(tmpDir, "example_test.go")
@@ -122,7 +114,7 @@ func helperFunc() {
 }
 `
 
-	if err := os.WriteFile(testFile, []byte(testContent), 0644); err != nil {
+	if err := os.WriteFile(testFile, []byte(testContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

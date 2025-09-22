@@ -58,7 +58,7 @@ func findTestFiles(directory string) ([]string, error) {
 	return testFiles, nil
 }
 
-func findCorrespondingTestFile(filename string, functionName string) string {
+func findCorrespondingTestFile(filename string, _ string) string {
 	dir := filepath.Dir(filename)
 	base := filepath.Base(filename)
 	base = strings.TrimSuffix(base, ".go")

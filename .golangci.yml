@@ -19,6 +19,7 @@ issues:
     - bin
     - .github
     - tools
+    - example
   exclude-rules:
     - text: "shadow: declaration of \"err\""
       linters: ["govet"]

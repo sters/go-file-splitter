@@ -44,7 +44,6 @@ func SplitTestFunctions(directory string) error {
 	return nil
 }
 
-
 func processGoFile(filename string, strategy MethodStrategy) error {
 	fset := token.NewFileSet()
 	src, err := os.ReadFile(filename)
@@ -91,32 +90,8 @@ func processGoFile(filename string, strategy MethodStrategy) error {
 	}
 
 	// Handle methods based on strategy
-	if strategy == MethodStrategyWithStruct {
-		// Group methods with their structs
-		if err := writeMethodsWithStructs(outputDir, publicDecls, publicMethods, node.Name.Name, node.Imports, fset); err != nil {
-			return fmt.Errorf("failed to write methods with structs: %w", err)
-		}
-	} else {
-		// Strategy: separate - Write methods to individual files
-		for _, method := range publicMethods {
-			snakeCaseName := methodNameToSnakeCase(method.ReceiverType, method.Name)
-			outputFileName := snakeCaseName + ".go"
-			outputFile := filepath.Join(outputDir, outputFileName)
-
-			if err := writePublicMethod(outputFile, method, fset); err != nil {
-				return fmt.Errorf("failed to write method file %s: %w", outputFile, err)
-			}
-			fmt.Printf("Created: %s\n", outputFile)
-		}
-
-		// Write public const/var/type declarations to common.go
-		if len(publicDecls) > 0 {
-			commonFile := filepath.Join(outputDir, "common.go")
-			if err := writeCommonFile(commonFile, publicDecls, node.Name.Name, node.Imports, fset); err != nil {
-				return fmt.Errorf("failed to write common.go: %w", err)
-			}
-			fmt.Printf("Created: %s\n", commonFile)
-		}
+	if err := writeMethodsAndDeclarations(strategy, outputDir, publicDecls, publicMethods, node.Name.Name, node.Imports, fset); err != nil {
+		return err
 	}
 
 	// Update original file to keep only private content
@@ -168,9 +143,6 @@ func processTestFile(filename string) error {
 	return nil
 }
 
-
-
-
 func updateOriginalFile(filename string, extractedFuncs []PublicFunction, extractedDecls []PublicDeclaration, extractedMethods []PublicMethod, fset *token.FileSet) error {
 	src, err := os.ReadFile(filename)
 	if err != nil {
@@ -182,79 +154,11 @@ func updateOriginalFile(filename string, extractedFuncs []PublicFunction, extrac
 		return fmt.Errorf("failed to parse file: %w", err)
 	}
 
-	// Create maps for quick lookup
-	extractedFuncNames := make(map[string]bool)
-	for _, fn := range extractedFuncs {
-		extractedFuncNames[fn.Name] = true
-	}
-
-	extractedDeclPtrs := make(map[*ast.GenDecl]bool)
-	for _, decl := range extractedDecls {
-		extractedDeclPtrs[decl.GenDecl] = true
-	}
-
-	// Create a map for extracted methods using receiver type and method name as key
-	extractedMethodKeys := make(map[string]bool)
-	for _, method := range extractedMethods {
-		key := method.ReceiverType + "." + method.Name
-		extractedMethodKeys[key] = true
-	}
+	// Create extraction maps
+	extractedFuncNames, extractedDeclPtrs, extractedMethodKeys := buildExtractionMaps(extractedFuncs, extractedDecls, extractedMethods)
 
 	// Filter declarations
-	var newDecls []ast.Decl
-	hasRemainingContent := false
-
-	for _, decl := range node.Decls {
-		switch d := decl.(type) {
-		case *ast.FuncDecl:
-			// Check if this is a method that was extracted
-			isExtractedMethod := false
-			if d.Recv != nil {
-				// This is a method, check if it was extracted
-				receiverType := getReceiverTypeName(d.Recv)
-				if receiverType != "" {
-					key := receiverType + "." + d.Name.Name
-					isExtractedMethod = extractedMethodKeys[key]
-				}
-			}
-
-			// Keep private functions and methods that were not extracted
-			if !extractedFuncNames[d.Name.Name] && !isExtractedMethod {
-				newDecls = append(newDecls, decl)
-				hasRemainingContent = true
-			}
-		case *ast.GenDecl:
-			if d.Tok == token.IMPORT {
-				continue // We'll re-add imports later if needed
-			}
-			// Keep private declarations
-			if !extractedDeclPtrs[d] {
-				// Check if this declaration has any private members
-				hasPrivate := false
-				for _, spec := range d.Specs {
-					switch s := spec.(type) {
-					case *ast.ValueSpec:
-						for _, name := range s.Names {
-							if !unicode.IsUpper(rune(name.Name[0])) {
-								hasPrivate = true
-
-								break
-							}
-						}
-					case *ast.TypeSpec:
-						// Check if the type is private
-						if !unicode.IsUpper(rune(s.Name.Name[0])) {
-							hasPrivate = true
-						}
-					}
-				}
-				if hasPrivate {
-					newDecls = append(newDecls, decl)
-					hasRemainingContent = true
-				}
-			}
-		}
-	}
+	newDecls, hasRemainingContent := filterDeclarations(node.Decls, extractedFuncNames, extractedDeclPtrs, extractedMethodKeys)
 
 	// If no remaining content, delete the file
 	if !hasRemainingContent || len(newDecls) == 0 {
@@ -289,63 +193,10 @@ func updateOriginalFile(filename string, extractedFuncs []PublicFunction, extrac
 	// We need to collect comment text that should be removed
 	removedCommentTexts := make(map[string]bool)
 
-	// Collect comment texts from extracted functions
-	for _, fn := range extractedFuncs {
-		// Use the original FuncDecl from the extracted function
-		if fn.FuncDecl != nil {
-			// Remove doc comments
-			if fn.FuncDecl.Doc != nil {
-				for _, c := range fn.FuncDecl.Doc.List {
-					removedCommentTexts[c.Text] = true
-				}
-			}
-			// Remove inline comments collected during extraction
-			for _, cg := range fn.InlineComments {
-				for _, c := range cg.List {
-					removedCommentTexts[c.Text] = true
-				}
-			}
-			// Remove standalone comments
-			for _, cg := range fn.StandaloneComments {
-				for _, c := range cg.List {
-					removedCommentTexts[c.Text] = true
-				}
-			}
-		}
-	}
-
-	// Collect comment texts from extracted declarations
-	for _, decl := range extractedDecls {
-		if decl.Comments != nil {
-			for _, c := range decl.Comments.List {
-				removedCommentTexts[c.Text] = true
-			}
-		}
-	}
-
-	// Collect comment texts from extracted methods
-	for _, method := range extractedMethods {
-		if method.FuncDecl != nil {
-			// Remove doc comments
-			if method.FuncDecl.Doc != nil {
-				for _, c := range method.FuncDecl.Doc.List {
-					removedCommentTexts[c.Text] = true
-				}
-			}
-			// Remove inline comments
-			for _, cg := range method.InlineComments {
-				for _, c := range cg.List {
-					removedCommentTexts[c.Text] = true
-				}
-			}
-			// Remove standalone comments
-			for _, cg := range method.StandaloneComments {
-				for _, c := range cg.List {
-					removedCommentTexts[c.Text] = true
-				}
-			}
-		}
-	}
+	// Collect comments to remove
+	addFunctionComments(&removedCommentTexts, extractedFuncs)
+	addDeclarationComments(&removedCommentTexts, extractedDecls)
+	addMethodComments(&removedCommentTexts, extractedMethods)
 
 	// Keep only comment groups that don't contain removed comment texts
 	var remainingComments []*ast.CommentGroup
@@ -354,6 +205,7 @@ func updateOriginalFile(filename string, extractedFuncs []PublicFunction, extrac
 		for _, c := range cg.List {
 			if removedCommentTexts[c.Text] {
 				shouldKeep = false
+
 				break
 			}
 		}
@@ -473,6 +325,7 @@ func removeExtractedTests(filename string, extractedTests []TestFunction, fset *
 		for _, c := range cg.List {
 			if removedCommentTexts[c.Text] {
 				shouldKeep = false
+
 				break
 			}
 		}
@@ -492,6 +345,202 @@ func removeExtractedTests(filename string, extractedTests []TestFunction, fset *
 	return nil
 }
 
+// writeMethodsAndDeclarations handles writing methods and declarations based on strategy.
+func writeMethodsAndDeclarations(strategy MethodStrategy, outputDir string, publicDecls []PublicDeclaration, publicMethods []PublicMethod, packageName string, imports []*ast.ImportSpec, fset *token.FileSet) error {
+	if strategy == MethodStrategyWithStruct {
+		return writeMethodsWithStructs(outputDir, publicDecls, publicMethods, packageName, imports, fset)
+	}
+
+	// Strategy: separate - Write methods to individual files
+	if err := writeSeparateMethods(outputDir, publicMethods, fset); err != nil {
+		return err
+	}
+
+	// Write public const/var/type declarations to common.go
+	if len(publicDecls) > 0 {
+		commonFile := filepath.Join(outputDir, "common.go")
+		if err := writeCommonFile(commonFile, publicDecls, packageName, imports, fset); err != nil {
+			return fmt.Errorf("failed to write common.go: %w", err)
+		}
+		fmt.Printf("Created: %s\n", commonFile)
+	}
+
+	return nil
+}
+
+// writeSeparateMethods writes each method to its own file.
+func writeSeparateMethods(outputDir string, publicMethods []PublicMethod, fset *token.FileSet) error {
+	for _, method := range publicMethods {
+		snakeCaseName := methodNameToSnakeCase(method.ReceiverType, method.Name)
+		outputFileName := snakeCaseName + ".go"
+		outputFile := filepath.Join(outputDir, outputFileName)
+
+		if err := writePublicMethod(outputFile, method, fset); err != nil {
+			return fmt.Errorf("failed to write method file %s: %w", outputFile, err)
+		}
+		fmt.Printf("Created: %s\n", outputFile)
+	}
+
+	return nil
+}
+
+// Helper functions for updateOriginalFile to reduce complexity
+
+func buildExtractionMaps(extractedFuncs []PublicFunction, extractedDecls []PublicDeclaration, extractedMethods []PublicMethod) (map[string]bool, map[*ast.GenDecl]bool, map[string]bool) {
+	extractedFuncNames := make(map[string]bool)
+	for _, fn := range extractedFuncs {
+		extractedFuncNames[fn.Name] = true
+	}
+
+	extractedDeclPtrs := make(map[*ast.GenDecl]bool)
+	for _, decl := range extractedDecls {
+		extractedDeclPtrs[decl.GenDecl] = true
+	}
+
+	extractedMethodKeys := make(map[string]bool)
+	for _, method := range extractedMethods {
+		key := method.ReceiverType + "." + method.Name
+		extractedMethodKeys[key] = true
+	}
+
+	return extractedFuncNames, extractedDeclPtrs, extractedMethodKeys
+}
+
+func filterDeclarations(decls []ast.Decl, extractedFuncNames map[string]bool, extractedDeclPtrs map[*ast.GenDecl]bool, extractedMethodKeys map[string]bool) ([]ast.Decl, bool) {
+	var newDecls []ast.Decl
+	hasRemainingContent := false
+
+	for _, decl := range decls {
+		if shouldKeepDeclaration(decl, extractedFuncNames, extractedDeclPtrs, extractedMethodKeys) {
+			newDecls = append(newDecls, decl)
+			hasRemainingContent = true
+		}
+	}
+
+	return newDecls, hasRemainingContent
+}
+
+func shouldKeepDeclaration(decl ast.Decl, extractedFuncNames map[string]bool, extractedDeclPtrs map[*ast.GenDecl]bool, extractedMethodKeys map[string]bool) bool {
+	switch d := decl.(type) {
+	case *ast.FuncDecl:
+		return shouldKeepFunction(d, extractedFuncNames, extractedMethodKeys)
+	case *ast.GenDecl:
+		return shouldKeepGenDecl(d, extractedDeclPtrs)
+	default:
+		return false
+	}
+}
+
+func shouldKeepFunction(d *ast.FuncDecl, extractedFuncNames map[string]bool, extractedMethodKeys map[string]bool) bool {
+	// Check if this is a method that was extracted
+	if d.Recv != nil {
+		receiverType := getReceiverTypeName(d.Recv)
+		if receiverType != "" {
+			key := receiverType + "." + d.Name.Name
+			if extractedMethodKeys[key] {
+				return false
+			}
+		}
+	}
+
+	// Keep if not in extracted functions
+	return !extractedFuncNames[d.Name.Name]
+}
+
+func shouldKeepGenDecl(d *ast.GenDecl, extractedDeclPtrs map[*ast.GenDecl]bool) bool {
+	if d.Tok == token.IMPORT {
+		return false // We'll re-add imports later if needed
+	}
+
+	// Keep private declarations
+	if extractedDeclPtrs[d] {
+		return false
+	}
+
+	// Check if this declaration has any private members
+	return hasPrivateMembers(d)
+}
+
+func hasPrivateMembers(d *ast.GenDecl) bool {
+	for _, spec := range d.Specs {
+		switch s := spec.(type) {
+		case *ast.ValueSpec:
+			for _, name := range s.Names {
+				if !unicode.IsUpper(rune(name.Name[0])) {
+					return true
+				}
+			}
+		case *ast.TypeSpec:
+			if !unicode.IsUpper(rune(s.Name.Name[0])) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func addFunctionComments(removedCommentTexts *map[string]bool, extractedFuncs []PublicFunction) {
+	for _, fn := range extractedFuncs {
+		if fn.FuncDecl == nil {
+			continue
+		}
+
+		if fn.FuncDecl.Doc != nil {
+			for _, c := range fn.FuncDecl.Doc.List {
+				(*removedCommentTexts)[c.Text] = true
+			}
+		}
+
+		for _, cg := range fn.InlineComments {
+			for _, c := range cg.List {
+				(*removedCommentTexts)[c.Text] = true
+			}
+		}
+
+		for _, cg := range fn.StandaloneComments {
+			for _, c := range cg.List {
+				(*removedCommentTexts)[c.Text] = true
+			}
+		}
+	}
+}
+
+func addDeclarationComments(removedCommentTexts *map[string]bool, extractedDecls []PublicDeclaration) {
+	for _, decl := range extractedDecls {
+		if decl.Comments != nil {
+			for _, c := range decl.Comments.List {
+				(*removedCommentTexts)[c.Text] = true
+			}
+		}
+	}
+}
+
+func addMethodComments(removedCommentTexts *map[string]bool, extractedMethods []PublicMethod) {
+	for _, method := range extractedMethods {
+		if method.FuncDecl == nil {
+			continue
+		}
+
+		if method.FuncDecl.Doc != nil {
+			for _, c := range method.FuncDecl.Doc.List {
+				(*removedCommentTexts)[c.Text] = true
+			}
+		}
+
+		for _, cg := range method.InlineComments {
+			for _, c := range cg.List {
+				(*removedCommentTexts)[c.Text] = true
+			}
+		}
+
+		for _, cg := range method.StandaloneComments {
+			for _, c := range cg.List {
+				(*removedCommentTexts)[c.Text] = true
+			}
+		}
+	}
+}
 
 func splitTestForFunction(testFile string, functionName string, outputDir string) error {
 	fset := token.NewFileSet()
@@ -557,6 +606,3 @@ func splitTestForFunction(testFile string, functionName string, outputDir string
 
 	return nil
 }
-
-
-

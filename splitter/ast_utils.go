@@ -202,6 +202,7 @@ func findUsedPackages(fn *ast.FuncDecl) map[string]bool {
 				}
 			}
 		}
+
 		return true
 	})
 
