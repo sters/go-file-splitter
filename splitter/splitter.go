@@ -11,7 +11,7 @@ import (
 	"unicode"
 )
 
-func SplitPublicFunctions(directory string) error {
+func SplitPublicFunctions(directory string, strategy MethodStrategy) error {
 	goFiles, err := findGoFiles(directory)
 	if err != nil {
 		return fmt.Errorf("failed to find go files: %w", err)
@@ -21,7 +21,7 @@ func SplitPublicFunctions(directory string) error {
 		if strings.HasSuffix(file, "_test.go") {
 			continue
 		}
-		if err := processGoFile(file); err != nil {
+		if err := processGoFile(file, strategy); err != nil {
 			return fmt.Errorf("failed to process %s: %w", file, err)
 		}
 	}
@@ -45,7 +45,7 @@ func SplitTestFunctions(directory string) error {
 }
 
 
-func processGoFile(filename string) error {
+func processGoFile(filename string, strategy MethodStrategy) error {
 	fset := token.NewFileSet()
 	src, err := os.ReadFile(filename)
 	if err != nil {
@@ -59,8 +59,9 @@ func processGoFile(filename string) error {
 
 	publicFuncs := extractPublicFunctions(node)
 	publicDecls := extractPublicDeclarations(node)
+	publicMethods := extractPublicMethods(node)
 
-	if len(publicFuncs) == 0 && len(publicDecls) == 0 {
+	if len(publicFuncs) == 0 && len(publicDecls) == 0 && len(publicMethods) == 0 {
 		return nil
 	}
 
@@ -89,17 +90,37 @@ func processGoFile(filename string) error {
 		}
 	}
 
-	// Write public const/var declarations to common.go
-	if len(publicDecls) > 0 {
-		commonFile := filepath.Join(outputDir, "common.go")
-		if err := writeCommonFile(commonFile, publicDecls, node.Name.Name, node.Imports, fset); err != nil {
-			return fmt.Errorf("failed to write common.go: %w", err)
+	// Handle methods based on strategy
+	if strategy == MethodStrategyWithStruct {
+		// Group methods with their structs
+		if err := writeMethodsWithStructs(outputDir, publicDecls, publicMethods, node.Name.Name, node.Imports, fset); err != nil {
+			return fmt.Errorf("failed to write methods with structs: %w", err)
 		}
-		fmt.Printf("Created: %s\n", commonFile)
+	} else {
+		// Strategy: separate - Write methods to individual files
+		for _, method := range publicMethods {
+			snakeCaseName := methodNameToSnakeCase(method.ReceiverType, method.Name)
+			outputFileName := snakeCaseName + ".go"
+			outputFile := filepath.Join(outputDir, outputFileName)
+
+			if err := writePublicMethod(outputFile, method, fset); err != nil {
+				return fmt.Errorf("failed to write method file %s: %w", outputFile, err)
+			}
+			fmt.Printf("Created: %s\n", outputFile)
+		}
+
+		// Write public const/var/type declarations to common.go
+		if len(publicDecls) > 0 {
+			commonFile := filepath.Join(outputDir, "common.go")
+			if err := writeCommonFile(commonFile, publicDecls, node.Name.Name, node.Imports, fset); err != nil {
+				return fmt.Errorf("failed to write common.go: %w", err)
+			}
+			fmt.Printf("Created: %s\n", commonFile)
+		}
 	}
 
 	// Update original file to keep only private content
-	if err := updateOriginalFile(filename, publicFuncs, publicDecls, fset); err != nil {
+	if err := updateOriginalFile(filename, publicFuncs, publicDecls, publicMethods, fset); err != nil {
 		return fmt.Errorf("failed to update original file: %w", err)
 	}
 
@@ -150,7 +171,7 @@ func processTestFile(filename string) error {
 
 
 
-func updateOriginalFile(filename string, extractedFuncs []PublicFunction, extractedDecls []PublicDeclaration, fset *token.FileSet) error {
+func updateOriginalFile(filename string, extractedFuncs []PublicFunction, extractedDecls []PublicDeclaration, extractedMethods []PublicMethod, fset *token.FileSet) error {
 	src, err := os.ReadFile(filename)
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
@@ -172,6 +193,13 @@ func updateOriginalFile(filename string, extractedFuncs []PublicFunction, extrac
 		extractedDeclPtrs[decl.GenDecl] = true
 	}
 
+	// Create a map for extracted methods using receiver type and method name as key
+	extractedMethodKeys := make(map[string]bool)
+	for _, method := range extractedMethods {
+		key := method.ReceiverType + "." + method.Name
+		extractedMethodKeys[key] = true
+	}
+
 	// Filter declarations
 	var newDecls []ast.Decl
 	hasRemainingContent := false
@@ -179,8 +207,19 @@ func updateOriginalFile(filename string, extractedFuncs []PublicFunction, extrac
 	for _, decl := range node.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
-			// Keep private functions and methods
-			if !extractedFuncNames[d.Name.Name] {
+			// Check if this is a method that was extracted
+			isExtractedMethod := false
+			if d.Recv != nil {
+				// This is a method, check if it was extracted
+				receiverType := getReceiverTypeName(d.Recv)
+				if receiverType != "" {
+					key := receiverType + "." + d.Name.Name
+					isExtractedMethod = extractedMethodKeys[key]
+				}
+			}
+
+			// Keep private functions and methods that were not extracted
+			if !extractedFuncNames[d.Name.Name] && !isExtractedMethod {
 				newDecls = append(newDecls, decl)
 				hasRemainingContent = true
 			}
@@ -193,13 +232,19 @@ func updateOriginalFile(filename string, extractedFuncs []PublicFunction, extrac
 				// Check if this declaration has any private members
 				hasPrivate := false
 				for _, spec := range d.Specs {
-					if vs, ok := spec.(*ast.ValueSpec); ok {
-						for _, name := range vs.Names {
+					switch s := spec.(type) {
+					case *ast.ValueSpec:
+						for _, name := range s.Names {
 							if !unicode.IsUpper(rune(name.Name[0])) {
 								hasPrivate = true
 
 								break
 							}
+						}
+					case *ast.TypeSpec:
+						// Check if the type is private
+						if !unicode.IsUpper(rune(s.Name.Name[0])) {
+							hasPrivate = true
 						}
 					}
 				}
@@ -274,6 +319,30 @@ func updateOriginalFile(filename string, extractedFuncs []PublicFunction, extrac
 		if decl.Comments != nil {
 			for _, c := range decl.Comments.List {
 				removedCommentTexts[c.Text] = true
+			}
+		}
+	}
+
+	// Collect comment texts from extracted methods
+	for _, method := range extractedMethods {
+		if method.FuncDecl != nil {
+			// Remove doc comments
+			if method.FuncDecl.Doc != nil {
+				for _, c := range method.FuncDecl.Doc.List {
+					removedCommentTexts[c.Text] = true
+				}
+			}
+			// Remove inline comments
+			for _, cg := range method.InlineComments {
+				for _, c := range cg.List {
+					removedCommentTexts[c.Text] = true
+				}
+			}
+			// Remove standalone comments
+			for _, cg := range method.StandaloneComments {
+				for _, c := range cg.List {
+					removedCommentTexts[c.Text] = true
+				}
 			}
 		}
 	}

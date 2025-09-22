@@ -59,7 +59,7 @@ func extractPublicDeclarations(node *ast.File) []PublicDeclaration {
 			continue
 		}
 
-		// Check if this declaration contains any public const/var
+		// Check if this declaration contains any public const/var/type
 		hasPublic := false
 		for _, spec := range genDecl.Specs {
 			switch s := spec.(type) {
@@ -70,6 +70,11 @@ func extractPublicDeclarations(node *ast.File) []PublicDeclaration {
 
 						break
 					}
+				}
+			case *ast.TypeSpec:
+				// Check if the type is public
+				if unicode.IsUpper(rune(s.Name.Name[0])) {
+					hasPublic = true
 				}
 			}
 			if hasPublic {
@@ -140,4 +145,78 @@ func extractTestFunctions(node *ast.File) []TestFunction {
 	}
 
 	return tests
+}
+
+func extractPublicMethods(node *ast.File) []PublicMethod {
+	var publicMethods []PublicMethod
+
+	for _, decl := range node.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Recv == nil {
+			continue
+		}
+
+		// Check if method is public (starts with uppercase)
+		if !unicode.IsUpper(rune(fn.Name.Name[0])) {
+			continue
+		}
+
+		// Extract receiver type name
+		receiverType := getReceiverTypeName(fn.Recv)
+		if receiverType == "" {
+			continue
+		}
+
+		var standaloneComments []*ast.CommentGroup
+		var inlineComments []*ast.CommentGroup
+		for _, cg := range node.Comments {
+			if cg == fn.Doc {
+				continue
+			}
+			// Check if comment is inside the function body
+			if fn.Body != nil && cg.Pos() >= fn.Body.Lbrace && cg.End() <= fn.Body.Rbrace {
+				inlineComments = append(inlineComments, cg)
+			} else if isFunctionSpecificComment(cg, fn, node.Decls) {
+				standaloneComments = append(standaloneComments, cg)
+			}
+		}
+
+		publicMethod := PublicMethod{
+			Name:               fn.Name.Name,
+			ReceiverType:       receiverType,
+			FuncDecl:           fn,
+			Comments:           fn.Doc,
+			StandaloneComments: standaloneComments,
+			InlineComments:     inlineComments,
+			Imports:            node.Imports,
+			Package:            node.Name.Name,
+		}
+		publicMethods = append(publicMethods, publicMethod)
+	}
+
+	return publicMethods
+}
+
+func getReceiverTypeName(recv *ast.FieldList) string {
+	if recv == nil || len(recv.List) == 0 {
+		return ""
+	}
+
+	field := recv.List[0]
+	if field.Type == nil {
+		return ""
+	}
+
+	switch t := field.Type.(type) {
+	case *ast.Ident:
+		// Simple type: func (r Receiver)
+		return t.Name
+	case *ast.StarExpr:
+		// Pointer type: func (r *Receiver)
+		if ident, ok := t.X.(*ast.Ident); ok {
+			return ident.Name
+		}
+	}
+
+	return ""
 }

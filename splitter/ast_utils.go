@@ -117,15 +117,7 @@ func findUsedImports(fn *ast.FuncDecl, allImports []*ast.ImportSpec) []*ast.Impo
 			pkgName = parts[len(parts)-1]
 		}
 
-		if importPath == "testing" && usedPackages["testing"] {
-			result = append(result, imp)
-		} else if usedPackages[pkgName] {
-			result = append(result, imp)
-		} else if strings.Contains(importPath, "testify/assert") && usedPackages["assert"] {
-			result = append(result, imp)
-		} else if strings.Contains(importPath, "testify/require") && usedPackages["require"] {
-			result = append(result, imp)
-		} else if strings.Contains(importPath, "testify/suite") && usedPackages["suite"] {
+		if usedPackages[pkgName] {
 			result = append(result, imp)
 		}
 	}
@@ -182,18 +174,36 @@ func findUsedImportsInDecls(decls []ast.Decl, allImports []*ast.ImportSpec) []*a
 			pkgName = parts[len(parts)-1]
 		}
 
-		if importPath == "testing" && usedPackages["testing"] {
-			result = append(result, imp)
-		} else if usedPackages[pkgName] {
-			result = append(result, imp)
-		} else if strings.Contains(importPath, "testify") && usedPackages["assert"] {
-			result = append(result, imp)
-		} else if strings.Contains(importPath, "testify") && usedPackages["require"] {
-			result = append(result, imp)
-		} else if strings.Contains(importPath, "testify") && usedPackages["suite"] {
+		if usedPackages[pkgName] {
 			result = append(result, imp)
 		}
 	}
 
 	return result
+}
+
+func findUsedPackages(fn *ast.FuncDecl) map[string]bool {
+	usedPackages := make(map[string]bool)
+
+	// Walk through the function body and find used packages
+	ast.Inspect(fn, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.SelectorExpr:
+			// Package.Function or Package.Type
+			if ident, ok := x.X.(*ast.Ident); ok {
+				usedPackages[ident.Name] = true
+			}
+		case *ast.CallExpr:
+			// Check for builtin functions that might need imports
+			if ident, ok := x.Fun.(*ast.Ident); ok {
+				switch ident.Name {
+				case "fmt.Sprintf", "fmt.Printf", "fmt.Println", "fmt.Errorf":
+					usedPackages["fmt"] = true
+				}
+			}
+		}
+		return true
+	})
+
+	return usedPackages
 }

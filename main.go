@@ -16,14 +16,16 @@ var (
 
 func main() {
 	var (
-		showVersion bool
-		publicFunc  bool
-		testOnly    bool
+		showVersion    bool
+		publicFunc     bool
+		testOnly       bool
+		methodStrategy string
 	)
 
 	flag.BoolVar(&showVersion, "version", false, "Show version information")
 	flag.BoolVar(&publicFunc, "public-func", true, "Split public functions into individual files (default)")
-	flag.BoolVar(&testOnly, "test-only", false, "Split only test functions")
+	flag.BoolVar(&testOnly, "test", false, "Split only test functions")
+	flag.StringVar(&methodStrategy, "method-strategy", "separate", "Strategy for methods: 'separate' (individual files) or 'with-struct' (keep with struct)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] <directory>\n", os.Args[0])
@@ -55,7 +57,14 @@ func main() {
 
 	var err error
 	if publicFunc {
-		err = splitter.SplitPublicFunctions(directory)
+		var strategy splitter.MethodStrategy
+		switch methodStrategy {
+		case "with-struct":
+			strategy = splitter.MethodStrategyWithStruct
+		default:
+			strategy = splitter.MethodStrategySeparate
+		}
+		err = splitter.SplitPublicFunctions(directory, strategy)
 	} else {
 		err = splitter.SplitTestFunctions(directory)
 	}

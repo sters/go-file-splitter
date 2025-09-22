@@ -140,6 +140,13 @@ func matchesAbbreviation(runes []rune, i int) (string, int) {
 	return "", 0
 }
 
+func methodNameToSnakeCase(receiverType, methodName string) string {
+	// Convert both receiver type and method name to snake case and combine
+	receiverSnake := functionNameToSnakeCase(receiverType)
+	methodSnake := functionNameToSnakeCase(methodName)
+	return receiverSnake + "_" + methodSnake
+}
+
 func shouldAddUnderscore(runes []rune, i int, result []rune) bool {
 	if i == 0 || !unicode.IsUpper(runes[i]) {
 		return false
