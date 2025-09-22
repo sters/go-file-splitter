@@ -15,3 +15,5 @@
 # vendor/
 bin/
 coverage.txt
+
+example/*.go
